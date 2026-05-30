@@ -40,6 +40,43 @@
 
 ---
 
+## 📦 本地模型下载
+
+本项目依赖以下 HuggingFace 模型，**首次运行前需下载到本地**（模型文件体积较大，不纳入 Git 管理）：
+
+| 模型 | 用途 | 大小 | 下载命令 |
+|:---|:---|:---|:---|
+| `BAAI/bge-small-zh-v1.5` | Embedding（语义编码） | ~100MB | 首次运行时自动缓存到 `~/.cache/huggingface` |
+| `BAAI/bge-reranker-base` | Cross-Encoder（精排） | ~1.1GB | **需手动下载到 `./models/bge-reranker-base/`** |
+
+### 下载 Reranker 模型
+
+```bash
+# 方式一：通过 hf-mirror 镜像下载（推荐国内网络）
+export HF_ENDPOINT=https://hf-mirror.com
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id='BAAI/bge-reranker-base',
+    local_dir='./models/bge-reranker-base',
+    local_dir_use_symlinks=False
+)
+"
+
+# 方式二：从其他已下载机器直接复制
+# cp -r /path/to/bge-reranker-base ./models/
+```
+
+下载完成后，在 `.env` 中确认配置（已默认配置）：
+```env
+RERANKER_MODEL=BAAI/bge-reranker-base
+RERANKER_LOCAL_PATH=./models/bge-reranker-base
+```
+
+> **注意**：若未下载模型，系统会自动降级为 `NoOpReranker`（无精排），检索质量会下降。
+
+---
+
 ## 🔄 数据管道
 
 系统由两条核心管道构成：**离线文档摄取管道** 与 **在线查询管道**。

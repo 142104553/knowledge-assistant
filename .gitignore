@@ -56,3 +56,5 @@ tests/results/
 .DS_Store
 Thumbs.db
 desktop.ini
+# 本地模型文件（大文件，不提交 Git，下载方式见 README）
+models/bge-reranker-base/
