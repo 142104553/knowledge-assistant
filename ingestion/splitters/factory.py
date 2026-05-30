@@ -185,10 +185,9 @@ class RecursiveCharacterSplitter(BaseSplitter):
                 metadata=metadata
             ))
 
-        # 添加 overlap：每个 chunk（除了第一个）前面追加前一个 chunk 的尾部
-        if self.chunk_overlap > 0 and len(result) > 1:
-            result = self._add_overlap(result)
-
+        # 注意：overlap 已在 _hard_split 中通过滑动窗口实现。
+        # 删除 _add_overlap 调用，因为其"追加前一块尾部到当前块"的实现会导致
+        # chunk 实际长度变为 chunk_size + overlap，严重超出预设大小。
         return result
 
     def _hard_split(self, text: str, metadata: dict) -> List[DocumentChunk]:

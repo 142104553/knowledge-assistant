@@ -147,10 +147,12 @@ def chat(request: QueryRequest):
             save_message(request.session_id, "assistant", response.answer, sources)
 
         return response
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="内部服务器错误，请稍后重试")
 
 
 @app.get("/api/v1/chat/history")
@@ -186,7 +188,8 @@ def ingest_document(file: UploadFile = File(...)):
     settings = get_settings()
 
     # 保存到临时文件
-    suffix = Path(file.filename).suffix
+    filename = file.filename or "unknown"
+    suffix = Path(filename).suffix
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
@@ -202,7 +205,7 @@ def ingest_document(file: UploadFile = File(...)):
         # 检查是否已存在相同文件
         existing = get_document_meta(doc_id)
         if existing:
-            print(f"[去重] 检测到已上传的相同文件: {file.filename} (doc_id={doc_id[:8]}...)")
+            print(f"[去重] 检测到已上传的相同文件: {filename} (doc_id={doc_id[:8]}...)")
             print(f"[去重] 先删除旧数据...")
             # 按 doc_id 删除向量库中的旧 chunk
             if vector_store:

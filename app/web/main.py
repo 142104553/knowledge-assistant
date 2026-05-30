@@ -44,15 +44,21 @@ def load_history():
         )
         if resp.status_code == 200:
             data = resp.json()
-            st.session_state.messages = []
+            old_messages = st.session_state.messages.copy()
+            new_messages = []
             for msg in data.get("messages", []):
-                st.session_state.messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"],
+                role = msg.get("role")
+                content = msg.get("content")
+                if not role or not content:
+                    continue
+                new_messages.append({
+                    "role": role,
+                    "content": content,
                     "sources": msg.get("sources", [])
                 })
-    except Exception:
-        pass
+            st.session_state.messages = new_messages
+    except Exception as e:
+        st.sidebar.warning(f"加载历史失败: {e}")
 
 
 def call_chat_api(query: str, enable_agent: bool = False) -> dict:
@@ -66,7 +72,7 @@ def call_chat_api(query: str, enable_agent: bool = False) -> dict:
                 "top_k": 15,
                 "enable_agent": enable_agent
             },
-            timeout=120
+            timeout=300
         )
         response.raise_for_status()
         return response.json()
@@ -262,6 +268,17 @@ def render_chat_interface():
                 query_time = result.get("query_time_ms")
 
                 st.markdown(answer)
+
+                if sources:
+                    with st.expander("📚 查看来源"):
+                        for i, source in enumerate(sources[:5], 1):
+                            meta = source.get("metadata", {})
+                            st.markdown(f"**[{i}]** {source.get('content', '')[:200]}...")
+                            st.caption(
+                                f"来源: {meta.get('source_file', 'N/A')} | "
+                                f"页码: {meta.get('page_number', 'N/A')} | "
+                                f"相关度: {float(source.get('score') or 0):.3f}"
+                            )
 
                 if query_time:
                     st.caption(f"⏱️ 响应时间: {query_time}ms")

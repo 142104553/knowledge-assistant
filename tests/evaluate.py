@@ -14,6 +14,7 @@ RAG 系统评测脚本
 
 import json
 import os
+import sys
 import argparse
 import time
 from pathlib import Path

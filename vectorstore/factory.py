@@ -228,9 +228,9 @@ class ChromaVectorStore(BaseVectorStore):
         ids: Optional[List[str]] = None,
         filter_dict: Optional[Dict[str, Any]] = None
     ) -> None:
-        if ids:
+        if ids is not None:
             self.collection.delete(ids=ids)
-        elif filter_dict:
+        elif filter_dict is not None:
             self.collection.delete(where=filter_dict)
         else:
             raise ValueError("必须提供 ids 或 filter_dict 之一")
@@ -380,12 +380,12 @@ class QdrantVectorStore(BaseVectorStore):
         ids: Optional[List[str]] = None,
         filter_dict: Optional[Dict[str, Any]] = None
     ) -> None:
-        if ids:
+        if ids is not None:
             self.client.delete(
                 collection_name=self.collection_name,
                 points_selector=ids
             )
-        elif filter_dict:
+        elif filter_dict is not None:
             from qdrant_client.models import Filter, FieldCondition, MatchValue
             conditions = [
                 FieldCondition(key=k, match=MatchValue(value=v))
