@@ -61,7 +61,7 @@ class LLMClient:
         temperature: float = 0.3,
         max_tokens: int = None
     ) -> str:
-        """调用 LLM 生成文本"""
+        """调用 LLM 生成文本（非流式）"""
         kwargs = {
             "model": self.model,
             "messages": [
@@ -74,6 +74,31 @@ class LLMClient:
             kwargs["max_tokens"] = max_tokens
         response = self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content
+
+    def generate_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.3,
+        max_tokens: int = None
+    ):
+        """调用 LLM 生成文本（流式），yield 文本片段"""
+        kwargs = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": temperature,
+            "stream": True
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        response = self.client.chat.completions.create(**kwargs)
+        for chunk in response:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                yield delta.content
 
 
 class RAGChain:
@@ -191,6 +216,7 @@ class RAGChain:
             candidates=candidates,
             top_n=query_request.top_k
         )
+        self._last_ranked = ranked
         stage_times['rerank'] = int((datetime.now() - t0).total_seconds() * 1000)
 
         # === 阶段 4：上下文压缩与组装 ===
@@ -204,7 +230,7 @@ class RAGChain:
             # 空结果触发拒答
             answer = "根据现有知识库，无法找到与您的提问相关的信息。"
         else:
-            user_prompt = self._build_prompt(query_request.query, context, ranked)
+            user_prompt = self._build_prompt(query_request.query, context, ranked, files_in_context)
             answer = self.llm.generate(
                 system_prompt=self.SYSTEM_PROMPT,
                 user_prompt=user_prompt
@@ -221,6 +247,62 @@ class RAGChain:
             query_time_ms=elapsed,
             session_id=query_request.session_id
         )
+
+    def stream(self, query_request: QueryRequest):
+        """
+        流式执行 RAG 问答流程（检索同步，生成流式）
+        
+        Yields:
+            str: 文本片段
+        """
+        # === 阶段 0：MultiQuery ===
+        query_variants = self._generate_query_variants(query_request.query, n=3)
+
+        # === 阶段 1：查询向量化 ===
+        embeddings = self.embedder.embed(query_variants)
+
+        # === 阶段 2：混合检索 ===
+        all_candidates = []
+        seen_content = set()
+        for q, emb in zip(query_variants, embeddings):
+            batch = self.retriever.retrieve(
+                query=q,
+                query_embedding=emb,
+                top_k=query_request.top_k * 2,
+                filter_dict=query_request.filters
+            )
+            for c in batch:
+                if c.content not in seen_content:
+                    seen_content.add(c.content)
+                    all_candidates.append(c)
+
+        # === 阶段 3：重排序 ===
+        ranked = self.reranker.rerank(
+            query=query_request.query,
+            candidates=all_candidates,
+            top_n=query_request.top_k
+        )
+
+        # 保存 ranked 供外部获取 sources
+        self._last_ranked = ranked
+
+        # === 阶段 4：上下文组装 ===
+        context, files_in_context = self._build_context(ranked)
+
+        # === 阶段 5：流式生成 ===
+        if not ranked:
+            yield "根据现有知识库，无法找到与您的提问相关的信息。"
+            return
+
+        user_prompt = self._build_prompt(query_request.query, context, ranked, files_in_context)
+        yield from self.llm.generate_stream(
+            system_prompt=self.SYSTEM_PROMPT,
+            user_prompt=user_prompt
+        )
+
+    def get_last_sources(self):
+        """获取上一次 stream/invoke 的检索结果"""
+        return getattr(self, '_last_ranked', [])
 
     def _build_context(self, chunks: List[RetrievedChunk]) -> tuple[str, set[str]]:
         """

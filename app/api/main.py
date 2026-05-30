@@ -17,8 +17,11 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
+import json
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 
 from app.core.config import get_settings, Settings
@@ -179,6 +182,59 @@ def chat(request: QueryRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="内部服务器错误，请稍后重试")
+
+
+@app.post("/api/v1/chat/stream")
+def chat_stream(request: QueryRequest):
+    """流式问答接口，返回 SSE 事件流"""
+    if not rag_chain:
+        raise HTTPException(status_code=503, detail="服务初始化中，请稍后重试")
+
+    settings = get_settings()
+
+    def event_generator():
+        # 保存用户提问
+        if request.session_id:
+            save_message(request.session_id, "user", request.query)
+
+        full_answer = ""
+        try:
+            if settings.enable_agent and request.enable_agent:
+                # Agent 模式暂不支持流式，fallback 到非流式
+                intent = agent_router.analyze_intent(request.query)
+                plan = agent_router.plan(intent, request.query)
+                response = agent_router.execute(plan, request.query)
+                full_answer = response.answer
+                yield f"data: {json.dumps({'type': 'token', 'content': full_answer})}\n\n"
+                sources = response.sources
+            else:
+                for chunk in rag_chain.stream(request):
+                    full_answer += chunk
+                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+                sources = rag_chain.get_last_sources()
+
+            # 发送 sources
+            sources_json = [
+                {"content": s.content, "metadata": s.metadata, "score": s.score}
+                for s in sources
+            ]
+            yield f"data: {json.dumps({'type': 'sources', 'sources': sources_json})}\n\n"
+
+            # 保存助手回答
+            if request.session_id:
+                save_message(request.session_id, "assistant", full_answer, sources_json)
+
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+    )
 
 
 @app.get("/api/v1/chat/history")

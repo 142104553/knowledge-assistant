@@ -62,7 +62,7 @@ def load_history():
 
 
 def call_chat_api(query: str, enable_agent: bool = False) -> dict:
-    """调用后端问答 API"""
+    """调用后端问答 API（非流式）"""
     try:
         response = requests.post(
             f"{API_BASE_URL}/api/v1/chat",
@@ -82,6 +82,44 @@ def call_chat_api(query: str, enable_agent: bool = False) -> dict:
     except Exception as e:
         st.error(f"❌ 请求失败: {str(e)}")
         return None
+
+
+def stream_chat_api(query: str, enable_agent: bool = False):
+    """调用后端流式问答 API，yield token 内容"""
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/api/v1/chat/stream",
+            json={
+                "query": query,
+                "session_id": st.session_state.session_id,
+                "top_k": 15,
+                "enable_agent": enable_agent
+            },
+            stream=True,
+            timeout=300
+        )
+        response.raise_for_status()
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+            line = line.decode('utf-8')
+            if line.startswith('data: '):
+                data = json.loads(line[6:])
+                msg_type = data.get('type')
+                if msg_type == 'token':
+                    yield data['content']
+                elif msg_type == 'sources':
+                    st.session_state.last_sources = data.get('sources', [])
+                elif msg_type == 'error':
+                    st.session_state.stream_error = data.get('message', '未知错误')
+                    break
+                elif msg_type == 'done':
+                    break
+    except requests.exceptions.ConnectionError:
+        st.error("❌ 无法连接到后端服务。请先启动 API：\n```\nuvicorn app.api.main:app --port 8000\n```")
+    except Exception as e:
+        st.error(f"❌ 请求失败: {str(e)}")
 
 
 def upload_file(file) -> dict:
@@ -256,38 +294,31 @@ def render_chat_interface():
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("思考中..."):
-                result = call_chat_api(
+            # 流式输出
+            answer = st.write_stream(
+                stream_chat_api(
                     prompt,
                     enable_agent=st.session_state.get("enable_agent", False)
                 )
+            )
 
-            if result:
-                answer = result.get("answer", "无回答")
-                sources = result.get("sources", [])
-                query_time = result.get("query_time_ms")
+            sources = st.session_state.get("last_sources", [])
+            if sources:
+                with st.expander("📚 查看来源"):
+                    for i, source in enumerate(sources[:5], 1):
+                        meta = source.get("metadata", {})
+                        st.markdown(f"**[{i}]** {source.get('content', '')[:200]}...")
+                        st.caption(
+                            f"来源: {meta.get('source_file', 'N/A')} | "
+                            f"页码: {meta.get('page_number', 'N/A')} | "
+                            f"相关度: {float(source.get('score') or 0):.3f}"
+                        )
 
-                st.markdown(answer)
-
-                if sources:
-                    with st.expander("📚 查看来源"):
-                        for i, source in enumerate(sources[:5], 1):
-                            meta = source.get("metadata", {})
-                            st.markdown(f"**[{i}]** {source.get('content', '')[:200]}...")
-                            st.caption(
-                                f"来源: {meta.get('source_file', 'N/A')} | "
-                                f"页码: {meta.get('page_number', 'N/A')} | "
-                                f"相关度: {float(source.get('score') or 0):.3f}"
-                            )
-
-                if query_time:
-                    st.caption(f"⏱️ 响应时间: {query_time}ms")
-
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer,
-                    "sources": sources
-                })
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "sources": sources
+            })
 
 
 def main():

@@ -22,6 +22,7 @@ from typing import List, Dict, Any
 from datetime import datetime
 
 import requests
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -49,8 +50,22 @@ def call_rag(query: str) -> Dict[str, Any]:
         return {"answer": f"[错误] {e}", "sources": []}
 
 
+class EvaluationResult(BaseModel):
+    """LLM 评判结构化输出模型"""
+    correctness: int = Field(..., ge=1, le=5, description="正确性评分（1-5分）")
+    completeness: int = Field(..., ge=1, le=5, description="完整性评分（1-5分）")
+    overall_quality: int = Field(..., ge=1, le=5, description="整体质量评分（1-5分）")
+    analysis: str = Field(..., description="简要分析（50-100字）")
+    issues: List[str] = Field(default_factory=list, description="发现的具体问题列表")
+
+    @field_validator('correctness', 'completeness', 'overall_quality', mode='before')
+    @classmethod
+    def clamp_score(cls, v):
+        return max(1, min(5, int(v)))
+
+
 def call_llm_judge(standard_answer: str, rag_answer: str, context: str, query: str) -> Dict[str, Any]:
-    """调用 LLM 作为评判者，给回答打分"""
+    """调用 LLM 作为评判者，给回答打分（使用结构化输出约束 JSON）"""
     try:
         import openai
     except ImportError:
@@ -101,16 +116,7 @@ def call_llm_judge(standard_answer: str, rag_answer: str, context: str, query: s
    - 2分：较差回答
    - 1分：不合格回答
 
-【输出格式】
-请输出严格的 JSON 对象，不要包含 markdown 代码块：
-{{
-  "correctness": 分数,
-  "completeness": 分数,
-  "overall_quality": 分数,
-  "analysis": "简要分析（50-100字）",
-  "issues": ["发现的具体问题1", "问题2"]
-}}
-"""
+请输出严格的 JSON 对象，不要包含 markdown 代码块或额外文字。"""
 
     response = client.chat.completions.create(
         model=model,
@@ -119,42 +125,34 @@ def call_llm_judge(standard_answer: str, rag_answer: str, context: str, query: s
             {"role": "user", "content": prompt}
         ],
         temperature=0.2,
-        max_tokens=1500
+        max_tokens=1500,
+        response_format={"type": "json_object"}
     )
 
     raw = response.choices[0].message.content.strip()
-    # 去掉可能的 markdown 代码块
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        raw = "\n".join(lines)
-
-    # 尝试用正则提取 JSON 块（处理 LLM 在 JSON 前后加文字的情况）
-    import re
-    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
-    if json_match:
-        raw = json_match.group(0)
 
     try:
-        result = json.loads(raw)
-        # 确保字段存在
-        for key in ["correctness", "completeness", "overall_quality"]:
-            if key not in result:
-                result[key] = 0
-            result[key] = max(1, min(5, int(result[key])))
-        return result
-    except (json.JSONDecodeError, ValueError, TypeError) as e:
-        print(f"    [评分警告] JSON 解析失败，原始输出前200字: {raw[:200]}")
-        return {
-            "correctness": 0,
-            "completeness": 0,
-            "overall_quality": 0,
-            "analysis": f"JSON 解析失败。原始输出: {raw[:200]}",
-            "issues": [f"LLM 返回格式异常: {e}"]
-        }
+        # 使用 Pydantic 模型解析并校验
+        result = EvaluationResult.model_validate_json(raw)
+        return result.model_dump()
+    except Exception as e:
+        # 回退：尝试直接 JSON 解析 + 正则提取
+        import re
+        json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(0)
+        try:
+            result = EvaluationResult.model_validate_json(raw)
+            return result.model_dump()
+        except Exception as e2:
+            print(f"    [评分警告] 结构化输出解析失败，原始输出前200字: {raw[:200]}")
+            return {
+                "correctness": 0,
+                "completeness": 0,
+                "overall_quality": 0,
+                "analysis": f"结构化输出解析失败。原始输出: {raw[:200]}",
+                "issues": [f"LLM 返回格式异常: {e2}"]
+            }
 
 
 def evaluate_single(qa_item: Dict[str, Any]) -> Dict[str, Any]:

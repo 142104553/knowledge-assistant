@@ -99,9 +99,12 @@ embedding_model: BGE-small-zh-v1.5
 | FastAPI 后端 | ✅ 已完成 | 同步端点, 防阻塞 |
 | 评估框架 | ✅ 已完成 | 语料→QA→评测 (4维度×3难度) |
 | Agent Router 框架 | ✅ 已完成 | 基础意图识别, 可扩展 |
-| BM25 混合检索 | 🔄 进行中 | HybridRetriever 已占位, BM25 语料库待初始化 |
-| 查询重写 / HyDE | ⏳ 待开发 | v0.4 规划 |
-| Reranker 重排序 | ⏳ 待开发 | v0.4 规划 |
+| BM25 混合检索 | ✅ 已完成 | Dense + BM25 RRF 融合 |
+| Cross-Encoder Reranker | ✅ 已完成 | `BAAI/bge-reranker-base` 精排 |
+| MultiQuery 查询扩展 | ✅ 已完成 | LLM 生成 3 个变体，并行检索合并 |
+| 流式输出 (Streaming) | ✅ 已完成 | FastAPI SSE + Streamlit `st.write_stream` |
+| 结构化输出 (Structured Output) | ✅ 已完成 | `response_format=json_object` + Pydantic 校验 |
+| 查询重写 / HyDE | ⏳ 待开发 | v0.5 规划 |
 | Agent 多步推理 | ⏳ 待开发 | v0.5 规划 |
 | 多模态文档 | ⏳ 待开发 | v0.5 规划 |
 | 权限控制与审计 | ⏳ 待开发 | v1.0 规划 |
@@ -113,15 +116,16 @@ embedding_model: BGE-small-zh-v1.5
 3. **CLI 摄取元数据缺失**：`python -m ingestion.pipeline` 不入 SQLite `documents` 表
 4. **Python 3.8 兼容**：f-string 反斜杠、posthog<3.0、Pydantic extra 字段已适配
 5. **旧数据清理**：首次使用前建议清空 `./chroma_db` 和 `./data/app.db`
-6. **评估 LLM JSON 解析偶发失败**：MiMo 返回格式不严格，已加正则提取 + 失败 0 分回退
+6. **BM25 语料热更新**：新文档上传后 BM25 索引需重启服务才能更新
 
 ## 7. 待办事项（Product Backlog）
 
 | 优先级 | 事项 | 目标版本 |
 |:---|:---|:---|
-| P0 | 接入 BM25 关键词检索，实现 Dense + BM25 混合召回 | v0.4 |
-| P0 | 接入 Cross-Encoder Reranker 精排 | v0.4 |
-| P1 | 查询重写 (Query Rewrite) 与 HyDE | v0.4 |
+| P0 | 流式输出 (Streaming) + 结构化输出 | v0.4 ✅ |
+| P0 | 接入 BM25 关键词检索，实现 Dense + BM25 混合召回 | v0.4 ✅ |
+| P0 | 接入 Cross-Encoder Reranker 精排 | v0.4 ✅ |
+| P1 | 查询重写 (Query Rewrite) 与 HyDE | v0.5 |
 | P1 | ReAct / Plan-and-Execute Agent 完整实现 | v0.5 |
 | P2 | 多模态支持（图像 OCR、PDF 内嵌图片） | v0.5 |
 | P2 | 对话记忆压缩（长对话自动摘要） | v0.5 |
@@ -133,6 +137,7 @@ embedding_model: BGE-small-zh-v1.5
 
 | 版本 | 日期 | 变更摘要 |
 |:---|:---|:---|
+| 0.4.0 | 2026-05-26 | 检索增强 v0.4：混合检索(BM25+Dense RRF) + Cross-Encoder Reranker + MultiQuery 扩展；流式输出 Streaming；结构化输出 Structured Output |
 | 0.3.0 | 2026-05-26 | 完整 RAG+Agent 系统：文档生命周期、BGE Embedding、Chroma 向量库、SQLite 持久化、FastAPI+Streamlit、评估框架、25条标注QA |
 | 0.2.0 | 2026-05-25 | 多路检索、Agent Router 框架、对话历史 |
 | 0.1.0 | 2026-05-24 | 基础 RAG 问答：单轮检索 + 生成 |

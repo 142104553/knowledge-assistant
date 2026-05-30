@@ -2,7 +2,7 @@
 
 基于 **RAG (检索增强生成) + LangChain + Agent** 架构构建的私有领域知识库问答系统。支持对企业内部文档（电力行业技术规程、运维手册、事故案例等）进行智能解析、向量化存储与检索，并通过 LLM 生成准确、可溯源的专业问答服务。
 
-> **当前版本**：v0.3 — 已实现完整的文档生命周期管理、多领域 RAG 检索、对话持久化与评估框架。
+> **当前版本**：v0.4 — 已实现混合检索(BM25+Dense)、Cross-Encoder Reranker、MultiQuery、流式输出与结构化输出。
 
 ---
 
@@ -268,24 +268,30 @@ python -m ingestion.pipeline --input-path ./data/documents/
 
 ## 🛣️ 演进路线
 
-### 当前 (v0.3) — 已交付
+### 当前 (v0.4) — 已交付
 - 完整的文档摄取 → 检索 → 生成 → 评估闭环
 - 电力行业 4 领域（调度/保护/配电/设备）测试语料与 25 条标注 QA
 - 文档生命周期一致性（API/前端 upload/delete/overwrite）
+- 混合检索 (BM25 + Dense RRF) + Cross-Encoder Reranker + MultiQuery
+- 流式输出 (Streaming) + 结构化输出 (Structured Output)
 
-### 近期 (v0.4) — 检索质量优化
-- [ ] **混合检索**：接入 BM25 关键词检索，与 Dense 向量检索融合（HybridRetriever）
-- [ ] **重排序器 (Reranker)**：Cross-Encoder 对多路召回结果精排
+### 近期 (v0.4) — 检索质量优化 ✅ 已完成
+- [x] **混合检索**：BM25 + Dense 向量检索 RRF 融合（`HybridRetriever`）
+- [x] **重排序器 (Reranker)**：`BAAI/bge-reranker-base` Cross-Encoder 精排
+- [x] **MultiQuery 查询扩展**：LLM 生成 3 个查询变体，并行检索合并去重
+- [x] **流式输出**：FastAPI SSE + Streamlit `st.write_stream`
+- [x] **结构化输出**：Pydantic `EvaluationResult` + `response_format=json_object`
+
+### 中期 (v0.5) — 检索与 Agent 增强
+- [ ] **向量库升级（Milvus 原生混合检索）**：将 Dense + Sparse(BM25) 统一存入 Milvus，替代当前 Chroma + 外挂 `rank_bm25` 架构，实现插入即生效、无需重启、支持百万级规模
 - [ ] **查询重写 (Query Rewrite)**：基于 LLM 的问题扩展与澄清，提升检索相关性
 - [ ] **HyDE (假设文档嵌入)**：用 LLM 生成伪答案再 Embedding，改善短查询检索效果
-
-### 中期 (v0.5) — Agent 与多模态
 - [ ] **Agent 多步推理**：ReAct / Plan-and-Execute 完整实现，支持"先查 A 再查 B 最后对比"类复合任务
+
+### 远期 (v0.6-v1.0) — 生产级能力
 - [ ] **工具扩展**：接入计算器、数据库查询、外部 API 等自定义 Tool
 - [ ] **多模态文档**：图像 OCR（表格、接线图）、PDF 内嵌图片解析
 - [ ] **对话记忆压缩**：长对话历史自动摘要，避免上下文窗口溢出
-
-### 远期 (v0.6-v1.0) — 生产级能力
 - [ ] **权限控制**：基于用户/角色的文档访问隔离（同一份向量库，不同可见范围）
 - [ ] **审计日志**：完整记录问答内容、检索来源、模型参数，支持合规审查
 - [ ] **增量索引**：监听文档目录变化，自动检测新增/修改/删除并同步更新索引
