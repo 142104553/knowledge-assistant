@@ -238,6 +238,25 @@ class ChromaVectorStore(BaseVectorStore):
     def count(self) -> int:
         return self.collection.count()
 
+    def get_all(self, limit: int = 100000) -> List[RetrievedChunk]:
+        """获取 collection 中的所有文档（用于构建 BM25 语料库）"""
+        total = self.collection.count()
+        if total == 0:
+            return []
+        
+        results = self.collection.get(limit=min(limit, total))
+        retrieved = []
+        docs = results.get('documents', []) or []
+        metas = results.get('metadatas', []) or []
+        
+        for i in range(len(docs)):
+            retrieved.append(RetrievedChunk(
+                content=docs[i],
+                metadata=metas[i] if i < len(metas) else {},
+                score=1.0
+            ))
+        return retrieved
+
 
 class QdrantVectorStore(BaseVectorStore):
     """

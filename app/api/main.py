@@ -64,13 +64,39 @@ async def lifespan(app: FastAPI):
     )
 
     # 初始化检索链
-    from rag.retrievers.hybrid import HybridRetriever
-    from rag.post_processors.reranker import NoOpReranker
+    from rag.retrievers.hybrid import HybridRetriever, BM25Retriever
+    from rag.post_processors.reranker import CrossEncoderReranker
     from rag.chains.rag_chain import LLMClient, RAGChain
     from agent.router import AgentRouter
 
-    retriever = HybridRetriever(vector_store=vector_store)
-    reranker = NoOpReranker()
+    # 构建 BM25 语料库（从向量库读取已有文档）
+    bm25_retriever = None
+    doc_count = vector_store.count()
+    if doc_count > 0:
+        try:
+            all_docs = vector_store.get_all()
+            bm25_retriever = BM25Retriever(
+                texts=[d.content for d in all_docs],
+                metadatas=[d.metadata for d in all_docs]
+            )
+            print(f"✅ BM25 语料库构建完成 | 文档数: {len(all_docs)}")
+        except Exception as e:
+            print(f"⚠️ BM25 语料库构建失败: {e}， fallback 到纯向量检索")
+
+    retriever = HybridRetriever(
+        vector_store=vector_store,
+        bm25_retriever=bm25_retriever
+    )
+
+    # 启用 Cross-Encoder Reranker（轻量版）
+    try:
+        reranker = CrossEncoderReranker(model_name="BAAI/bge-reranker-base")
+        print(f"✅ Cross-Encoder Reranker 加载完成")
+    except Exception as e:
+        print(f"⚠️ Cross-Encoder 加载失败: {e}，使用 NoOpReranker")
+        from rag.post_processors.reranker import NoOpReranker
+        reranker = NoOpReranker()
+
     llm = LLMClient(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
@@ -85,7 +111,7 @@ async def lifespan(app: FastAPI):
     )
     agent_router = AgentRouter(llm=llm, rag_chain=rag_chain)
 
-    print(f"✅ 初始化完成 | 向量库文档数: {vector_store.count()}")
+    print(f"✅ 初始化完成 | 向量库文档数: {doc_count} | 混合检索: {'✓' if bm25_retriever else '✗'} | 重排序: {'✓' if not isinstance(reranker, NoOpReranker) else '✗'}")
 
     yield
 

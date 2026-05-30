@@ -58,17 +58,21 @@ class LLMClient:
         self,
         system_prompt: str,
         user_prompt: str,
-        temperature: float = 0.3
+        temperature: float = 0.3,
+        max_tokens: int = None
     ) -> str:
         """调用 LLM 生成文本"""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        kwargs = {
+            "model": self.model,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=temperature
-        )
+            "temperature": temperature
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        response = self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content
 
 
@@ -108,6 +112,37 @@ class RAGChain:
         self.llm = llm
         self.max_context_tokens = max_context_tokens
 
+    def _generate_query_variants(self, query: str, n: int = 3) -> List[str]:
+        """
+        MultiQuery：生成查询变体，提升召回率
+        
+        用 LLM 生成同一问题的不同表述，覆盖更多关键词和语义角度。
+        """
+        prompt = f"""基于以下用户问题，生成 {n} 个不同表述的查询变体。
+要求：
+1. 保持原意不变
+2. 使用不同的关键词和句式
+3. 每个变体单独一行，不要编号
+4. 不要添加任何解释
+
+原始问题：{query}
+
+变体："""
+        try:
+            response = self.llm.generate(
+                system_prompt="你是一个查询改写专家。",
+                user_prompt=prompt,
+                temperature=0.5,
+                max_tokens=300
+            )
+            variants = [line.strip() for line in response.split('\n') if line.strip()]
+            # 加入原始查询，去重
+            all_queries = [query] + variants[:n]
+            return list(dict.fromkeys(all_queries))
+        except Exception as e:
+            print(f"[MultiQuery] 生成变体失败: {e}，使用原始查询")
+            return [query]
+
     def invoke(self, query_request: QueryRequest) -> ChatResponse:
         """
         执行完整的 RAG 问答流程
@@ -121,19 +156,32 @@ class RAGChain:
         start_time = datetime.now()
         stage_times = {}
 
+        # === 阶段 0：MultiQuery 查询变体生成 ===
+        t0 = datetime.now()
+        query_variants = self._generate_query_variants(query_request.query, n=3)
+        stage_times['multiquery'] = int((datetime.now() - t0).total_seconds() * 1000)
+
         # === 阶段 1：查询向量化 ===
         t0 = datetime.now()
-        query_embedding = self.embedder.embed([query_request.query])[0]
+        embeddings = self.embedder.embed(query_variants)
         stage_times['embed'] = int((datetime.now() - t0).total_seconds() * 1000)
 
-        # === 阶段 2：混合检索（召回） ===
+        # === 阶段 2：混合检索（MultiQuery 多路召回 + 合并去重） ===
         t0 = datetime.now()
-        candidates = self.retriever.retrieve(
-            query=query_request.query,
-            query_embedding=query_embedding,
-            top_k=query_request.top_k * 3,  # 多召回一些给重排
-            filter_dict=query_request.filters
-        )
+        all_candidates = []
+        seen_content = set()
+        for q, emb in zip(query_variants, embeddings):
+            batch = self.retriever.retrieve(
+                query=q,
+                query_embedding=emb,
+                top_k=query_request.top_k * 2,
+                filter_dict=query_request.filters
+            )
+            for c in batch:
+                if c.content not in seen_content:
+                    seen_content.add(c.content)
+                    all_candidates.append(c)
+        candidates = all_candidates
         stage_times['retrieve'] = int((datetime.now() - t0).total_seconds() * 1000)
 
         # === 阶段 3：重排序（精排） ===
@@ -164,7 +212,8 @@ class RAGChain:
         stage_times['llm'] = int((datetime.now() - t0).total_seconds() * 1000)
 
         elapsed = int((datetime.now() - start_time).total_seconds() * 1000)
-        print(f"[RAG耗时] 总:{elapsed}ms | embed:{stage_times['embed']}ms retrieve:{stage_times['retrieve']}ms rerank:{stage_times['rerank']}ms context:{stage_times['context']}ms llm:{stage_times['llm']}ms | chunks:{len(ranked)} | query_len:{len(query_request.query)} | context_len:{len(context)}")
+        mq_time = stage_times.get('multiquery', 0)
+        print(f"[RAG耗时] 总:{elapsed}ms | mq:{mq_time}ms embed:{stage_times['embed']}ms retrieve:{stage_times['retrieve']}ms rerank:{stage_times['rerank']}ms context:{stage_times['context']}ms llm:{stage_times['llm']}ms | variants:{len(query_variants)} | chunks:{len(ranked)} | query_len:{len(query_request.query)} | context_len:{len(context)}")
 
         return ChatResponse(
             answer=answer,
