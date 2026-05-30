@@ -59,14 +59,24 @@ class CrossEncoderReranker(BaseReranker):
     不要对全库文档做重排。
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-reranker-large"):
+    def __init__(self, model_name: str = "BAAI/bge-reranker-large", local_path: str = None):
         try:
             from sentence_transformers import CrossEncoder
         except ImportError:
             raise ImportError("请安装 sentence-transformers: pip install sentence-transformers")
 
-        self.model = CrossEncoder(model_name)
+        import os
+        # 优先级：显式本地路径 > 模型名(本地缓存) > 模型名(Hub下载)
+        if local_path and os.path.isdir(local_path):
+            load_path = local_path
+            print(f"[Reranker] Loading from local path: {local_path}")
+        else:
+            load_path = model_name
+            print(f"[Reranker] Loading from HuggingFace Hub: {model_name}")
+
+        self.model = CrossEncoder(load_path, local_files_only=True)
         self.model_name = model_name
+        self.local_path = local_path
 
     def rerank(
         self,

@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     score_threshold: float = 0.5
     max_context_tokens: int = 8000  # 增大上下文窗口，容纳更多文件内容
 
+    # === Reranker 配置 ===
+    reranker_model: str = "BAAI/bge-reranker-base"
+    reranker_local_path: Optional[str] = None  # 本地模型路径，优先于 Hub 下载
+
     # === Agent 配置 ===
     enable_agent: bool = True
 

@@ -92,12 +92,15 @@ async def lifespan(app: FastAPI):
     )
 
     # 启用 Cross-Encoder Reranker（轻量版）
+    from rag.post_processors.reranker import NoOpReranker
     try:
-        reranker = CrossEncoderReranker(model_name="BAAI/bge-reranker-base")
+        reranker = CrossEncoderReranker(
+            model_name=settings.reranker_model,
+            local_path=settings.reranker_local_path
+        )
         print(f"[OK] Cross-Encoder Reranker loaded")
     except Exception as e:
         print(f"[WARN] Cross-Encoder load failed: {e}, using NoOpReranker")
-        from rag.post_processors.reranker import NoOpReranker
         reranker = NoOpReranker()
 
     llm = LLMClient(
