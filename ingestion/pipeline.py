@@ -55,7 +55,7 @@ def run_ingestion_pipeline(
         raise ValueError(f"无效路径: {input_path}")
 
     if not files:
-        print("⚠️ 没有找到支持的文件")
+        print("[WARN] 没有找到支持的文件")
         return []
 
     # 2. 初始化组件
@@ -85,7 +85,7 @@ def run_ingestion_pipeline(
             # 3.1 加载
             loader = DocumentLoaderFactory.get_loader(str(file_path))
             raw_chunks = loader.load(str(file_path))
-            print(f"   ✓ 加载完成: {len(raw_chunks)} 页/段")
+            print(f"   [OK] 加载完成: {len(raw_chunks)} 页/段")
 
             # 3.2 分块
             # 根据文件类型选择分块策略
@@ -96,7 +96,7 @@ def run_ingestion_pipeline(
                 chunk_overlap=chunk_overlap
             )
             split_chunks = splitter.split(raw_chunks)
-            print(f"   ✓ 分块完成: {len(split_chunks)} 个 chunk")
+            print(f"   [OK] 分块完成: {len(split_chunks)} 个 chunk")
 
             # 注入 doc_id 到 metadata
             if doc_id:
@@ -106,11 +106,11 @@ def run_ingestion_pipeline(
             all_chunks.extend(split_chunks)
 
         except Exception as e:
-            print(f"   ❌ 处理失败: {e}")
+            print(f"   [FAIL] 处理失败: {e}")
             continue
 
     if not all_chunks:
-        print("\n⚠️ 没有成功提取任何文本块")
+        print("\n[WARN] 没有成功提取任何文本块")
         return []
 
     # 4. Embedding 向量化（批量处理）
@@ -135,7 +135,7 @@ def run_ingestion_pipeline(
 
         print(f"   批次 {i // batch_size + 1}/{total_batches} 完成 ({len(batch)} chunks)")
 
-    print(f"\n✅ 摄取完成！总计: {len(all_chunks)} 个 chunk")
+    print(f"\n[OK] 摄取完成！总计: {len(all_chunks)} 个 chunk")
     print(f"   向量库当前文档数: {vector_store.count()}")
 
     return all_chunks

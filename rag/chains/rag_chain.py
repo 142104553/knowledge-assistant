@@ -14,7 +14,7 @@
     response = chain.invoke("如何申请退款？")
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple, Set
 from datetime import datetime
 
 from models.document import QueryRequest, ChatResponse, RetrievedChunk
@@ -165,7 +165,7 @@ class RAGChain:
             all_queries = [query] + variants[:n]
             return list(dict.fromkeys(all_queries))
         except Exception as e:
-            print(f"[MultiQuery] 生成变体失败: {e}，使用原始查询")
+            print(f"[MultiQuery] variant generation failed: {e}, using original query")
             return [query]
 
     def invoke(self, query_request: QueryRequest) -> ChatResponse:
@@ -221,7 +221,7 @@ class RAGChain:
 
         # === 阶段 4：上下文压缩与组装 ===
         t0 = datetime.now()
-        context = self._build_context(ranked)
+        context, files_in_context = self._build_context(ranked)
         stage_times['context'] = int((datetime.now() - t0).total_seconds() * 1000)
 
         # === 阶段 5：LLM 生成 ===
@@ -239,7 +239,7 @@ class RAGChain:
 
         elapsed = int((datetime.now() - start_time).total_seconds() * 1000)
         mq_time = stage_times.get('multiquery', 0)
-        print(f"[RAG耗时] 总:{elapsed}ms | mq:{mq_time}ms embed:{stage_times['embed']}ms retrieve:{stage_times['retrieve']}ms rerank:{stage_times['rerank']}ms context:{stage_times['context']}ms llm:{stage_times['llm']}ms | variants:{len(query_variants)} | chunks:{len(ranked)} | query_len:{len(query_request.query)} | context_len:{len(context)}")
+        print(f"[RAG] total:{elapsed}ms mq:{mq_time}ms embed:{stage_times['embed']}ms retrieve:{stage_times['retrieve']}ms rerank:{stage_times['rerank']}ms context:{stage_times['context']}ms llm:{stage_times['llm']}ms | variants:{len(query_variants)} | chunks:{len(ranked)} | query_len:{len(query_request.query)} | context_len:{len(context)}")
 
         return ChatResponse(
             answer=answer,
@@ -304,7 +304,7 @@ class RAGChain:
         """获取上一次 stream/invoke 的检索结果"""
         return getattr(self, '_last_ranked', [])
 
-    def _build_context(self, chunks: List[RetrievedChunk]) -> tuple[str, set[str]]:
+    def _build_context(self, chunks: List[RetrievedChunk]) -> Tuple[str, Set[str]]:
         """
         将检索到的 chunk 组装成上下文字符串
 
@@ -376,7 +376,7 @@ class RAGChain:
         query: str,
         context: str,
         chunks: List[RetrievedChunk],
-        files_in_context: set[str] = None
+        files_in_context: Set[str] = None
     ) -> str:
         """
         构建发送给 LLM 的用户提示词

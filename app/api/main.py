@@ -42,8 +42,8 @@ async def lifespan(app: FastAPI):
     init_db()
 
     settings = get_settings()
-    print(f"🚀 启动 {settings.app_name} v{settings.app_version}")
-    print(f"📦 Embedding: {settings.embedding_provider} / {settings.embedding_model}")
+    print(f"[START] {settings.app_name} v{settings.app_version}")
+    print(f"[EMBED] {settings.embedding_provider} / {settings.embedding_model}")
 
     # 初始化 Embedding
     from embeddings.factory import EmbeddingFactory
@@ -56,8 +56,8 @@ async def lifespan(app: FastAPI):
     from vectorstore.factory import VectorStoreFactory
     chroma_path = Path(settings.chroma_persist_dir)
     if chroma_path.exists() and any(chroma_path.iterdir()):
-        print(f"[注意] 检测到已有向量库: {settings.chroma_persist_dir}")
-        print(f"[注意] 当前 Embedding 维度: {embedder.dimension}D")
+        print(f"[INFO] Vector store exists: {settings.chroma_persist_dir}")
+        print(f"[INFO] Embedding dim: {embedder.dimension}D")
 
     vector_store = VectorStoreFactory.create(
         provider=settings.vectorstore_provider,
@@ -82,9 +82,9 @@ async def lifespan(app: FastAPI):
                 texts=[d.content for d in all_docs],
                 metadatas=[d.metadata for d in all_docs]
             )
-            print(f"✅ BM25 语料库构建完成 | 文档数: {len(all_docs)}")
+            print(f"[OK] BM25 corpus built | docs: {len(all_docs)}")
         except Exception as e:
-            print(f"⚠️ BM25 语料库构建失败: {e}， fallback 到纯向量检索")
+            print(f"[WARN] BM25 build failed: {e}, fallback to dense only")
 
     retriever = HybridRetriever(
         vector_store=vector_store,
@@ -94,9 +94,9 @@ async def lifespan(app: FastAPI):
     # 启用 Cross-Encoder Reranker（轻量版）
     try:
         reranker = CrossEncoderReranker(model_name="BAAI/bge-reranker-base")
-        print(f"✅ Cross-Encoder Reranker 加载完成")
+        print(f"[OK] Cross-Encoder Reranker loaded")
     except Exception as e:
-        print(f"⚠️ Cross-Encoder 加载失败: {e}，使用 NoOpReranker")
+        print(f"[WARN] Cross-Encoder load failed: {e}, using NoOpReranker")
         from rag.post_processors.reranker import NoOpReranker
         reranker = NoOpReranker()
 
@@ -114,7 +114,7 @@ async def lifespan(app: FastAPI):
     )
     agent_router = AgentRouter(llm=llm, rag_chain=rag_chain)
 
-    print(f"✅ 初始化完成 | 向量库文档数: {doc_count} | 混合检索: {'✓' if bm25_retriever else '✗'} | 重排序: {'✓' if not isinstance(reranker, NoOpReranker) else '✗'}")
+    print(f"[OK] Init done | docs: {doc_count} | hybrid: {'Y' if bm25_retriever else 'N'} | rerank: {'Y' if not isinstance(reranker, NoOpReranker) else 'N'}")
 
     yield
 
@@ -287,7 +287,7 @@ def ingest_document(file: UploadFile = File(...)):
         # 检查是否已存在相同文件
         existing = get_document_meta(doc_id)
         if existing:
-            print(f"[去重] 检测到已上传的相同文件: {filename} (doc_id={doc_id[:8]}...)")
+            print(f"[DEDUP] Same file detected: {filename} (doc_id={doc_id[:8]}...)")
             print(f"[去重] 先删除旧数据...")
             # 按 doc_id 删除向量库中的旧 chunk
             if vector_store:

@@ -55,7 +55,7 @@ class EvaluationResult(BaseModel):
     correctness: int = Field(..., ge=1, le=5, description="正确性评分（1-5分）")
     completeness: int = Field(..., ge=1, le=5, description="完整性评分（1-5分）")
     overall_quality: int = Field(..., ge=1, le=5, description="整体质量评分（1-5分）")
-    analysis: str = Field(..., description="简要分析（50-100字）")
+    analysis: str = Field(default="", description="简要分析（50-100字）")
     issues: List[str] = Field(default_factory=list, description="发现的具体问题列表")
 
     @field_validator('correctness', 'completeness', 'overall_quality', mode='before')
@@ -246,27 +246,27 @@ def compute_statistics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 def print_report(stats: Dict[str, Any]):
     """打印评测报告"""
     print("\n" + "=" * 60)
-    print("📊 RAG 系统评测报告")
+    print("[REPORT] RAG Evaluation Report")
     print("=" * 60)
-    print(f"总样本数: {stats['total_samples']}")
-    print(f"平均正确性: {stats['avg_correctness']} / 5")
-    print(f"平均完整性: {stats['avg_completeness']} / 5")
-    print(f"平均整体质量: {stats['avg_overall_quality']} / 5")
+    print(f"Total samples: {stats['total_samples']}")
+    print(f"Avg correctness: {stats['avg_correctness']} / 5")
+    print(f"Avg completeness: {stats['avg_completeness']} / 5")
+    print(f"Avg overall_quality: {stats['avg_overall_quality']} / 5")
 
-    print("\n【按评测维度】")
+    print("\n[By Dimension]")
     for dim, data in stats["dimension_breakdown"].items():
-        print(f"  {dim:20s}: 样本{data['count']:3d} | 均分 {data['avg_overall']}")
+        print(f"  {dim:20s}: count={data['count']:3d} | avg={data['avg_overall']}")
 
-    print("\n【按难度等级】")
+    print("\n[By Difficulty]")
     for diff, data in stats["difficulty_breakdown"].items():
-        print(f"  {diff:10s}: 样本{data['count']:3d} | 均分 {data['avg_overall']}")
+        print(f"  {diff:10s}: count={data['count']:3d} | avg={data['avg_overall']}")
 
     if stats["failed_samples"]:
-        print(f"\n【低质量样本 ({len(stats['failed_samples'])} 条)】")
+        print(f"\n[Failed samples ({len(stats['failed_samples'])})]")
         for item in stats["failed_samples"][:5]:
-            print(f"  - [{item['dimension']}] {item['query'][:40]}... (均分 {item['overall_quality']})")
+            print(f"  - [{item['dimension']}] {item['query'][:40]}... (score {item['overall_quality']})")
             for issue in item["issues"][:2]:
-                print(f"      ⚠ {issue}")
+                print(f"      [WARN] {issue}")
 
     print("=" * 60)
 
@@ -303,6 +303,7 @@ def main():
             results.append({
                 "query": qa.get("query", ""),
                 "dimension": qa.get("dimension", "unknown"),
+                "difficulty": qa.get("difficulty", "medium"),
                 "scores": {"correctness": 0, "completeness": 0, "overall_quality": 0},
                 "analysis": f"评测异常: {e}",
                 "issues": [str(e)]
