@@ -14,6 +14,7 @@
     response = chain.invoke("如何申请退款？")
 """
 
+import threading
 from typing import List, Optional, Tuple, Set
 from datetime import datetime
 
@@ -216,7 +217,9 @@ class RAGChain:
             candidates=candidates,
             top_n=query_request.top_k
         )
-        self._last_ranked = ranked
+        if not hasattr(self, '_thread_local'):
+            self._thread_local = threading.local()
+        self._thread_local.last_ranked = ranked
         stage_times['rerank'] = int((datetime.now() - t0).total_seconds() * 1000)
 
         # === 阶段 4：上下文压缩与组装 ===
@@ -283,8 +286,10 @@ class RAGChain:
             top_n=query_request.top_k
         )
 
-        # 保存 ranked 供外部获取 sources
-        self._last_ranked = ranked
+        # 保存 ranked 供外部获取 sources（使用 thread-local 避免并发竞态）
+        if not hasattr(self, '_thread_local'):
+            self._thread_local = threading.local()
+        self._thread_local.last_ranked = ranked
 
         # === 阶段 4：上下文组装 ===
         context, files_in_context = self._build_context(ranked)
@@ -301,8 +306,8 @@ class RAGChain:
         )
 
     def get_last_sources(self):
-        """获取上一次 stream/invoke 的检索结果"""
-        return getattr(self, '_last_ranked', [])
+        """获取当前线程上一次 stream/invoke 的检索结果"""
+        return getattr(getattr(self, '_thread_local', None), 'last_ranked', [])
 
     def _build_context(self, chunks: List[RetrievedChunk]) -> Tuple[str, Set[str]]:
         """

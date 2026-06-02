@@ -121,7 +121,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    print("👋 应用关闭")
+    print("[SHUTDOWN] App stopped")
 
 
 app = FastAPI(

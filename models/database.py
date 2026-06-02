@@ -8,9 +8,13 @@ SQLite 持久化层
 
 import json
 import sqlite3
+import threading
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from pathlib import Path
+
+# 串行化 SQLite 写入，避免 WAL 模式下并发写锁
+_db_write_lock = threading.Lock()
 
 
 class _JSONEncoder(json.JSONEncoder):
@@ -86,18 +90,19 @@ def save_message(
     content: str,
     sources: Optional[List[Dict[str, Any]]] = None
 ) -> int:
-    """保存一条对话消息"""
-    conn = _get_conn()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO conversations (session_id, role, content, sources) VALUES (?, ?, ?, ?)",
-            (session_id, role, content, json.dumps(sources, cls=_JSONEncoder, ensure_ascii=False) if sources else None)
-        )
-        conn.commit()
-        return cursor.lastrowid
-    finally:
-        conn.close()
+    """保存一条对话消息（线程安全）"""
+    with _db_write_lock:
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO conversations (session_id, role, content, sources) VALUES (?, ?, ?, ?)",
+                (session_id, role, content, json.dumps(sources, cls=_JSONEncoder, ensure_ascii=False) if sources else None)
+            )
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
 
 
 def get_conversation_history(session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
@@ -126,14 +131,15 @@ def get_conversation_history(session_id: str, limit: int = 50) -> List[Dict[str,
 
 
 def clear_conversation(session_id: str) -> None:
-    """清空某个 session 的对话历史"""
-    conn = _get_conn()
-    try:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
-        conn.commit()
-    finally:
-        conn.close()
+    """清空某个 session 的对话历史（线程安全）"""
+    with _db_write_lock:
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -141,24 +147,25 @@ def clear_conversation(session_id: str) -> None:
 # ═══════════════════════════════════════════════════════════
 
 def save_document_meta(doc_id: str, filename: str, chunk_count: int = 0) -> None:
-    """保存/更新文档元数据"""
-    conn = _get_conn()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO documents (doc_id, filename, chunk_count) 
-            VALUES (?, ?, ?)
-            ON CONFLICT(doc_id) DO UPDATE SET 
-                filename=excluded.filename,
-                chunk_count=excluded.chunk_count,
-                created_at=CURRENT_TIMESTAMP
-            """,
-            (doc_id, filename, chunk_count)
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    """保存/更新文档元数据（线程安全）"""
+    with _db_write_lock:
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO documents (doc_id, filename, chunk_count) 
+                VALUES (?, ?, ?)
+                ON CONFLICT(doc_id) DO UPDATE SET 
+                    filename=excluded.filename,
+                    chunk_count=excluded.chunk_count,
+                    created_at=CURRENT_TIMESTAMP
+                """,
+                (doc_id, filename, chunk_count)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def get_document_meta(doc_id: str) -> Optional[Dict[str, Any]]:
@@ -203,9 +210,13 @@ def list_documents() -> List[Dict[str, Any]]:
 
 
 def delete_document_meta(doc_id: str) -> None:
-    """删除文档元数据记录"""
-    conn = _get_conn()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
-    conn.commit()
+    """删除文档元数据记录（线程安全）"""
+    with _db_write_lock:
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
+            conn.commit()
+        finally:
+            conn.close()
     conn.close()
