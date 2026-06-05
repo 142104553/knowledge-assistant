@@ -2,7 +2,7 @@
 
 基于 **RAG (检索增强生成) + LangChain + Agent** 架构构建的私有领域知识库问答系统。支持对企业内部文档（电力行业技术规程、运维手册、事故案例等）进行智能解析、向量化存储与检索，并通过 LLM 生成准确、可溯源的专业问答服务。
 
-> **当前版本**：v0.4 — 已实现混合检索(BM25+Dense)、Cross-Encoder Reranker、MultiQuery、流式输出与结构化输出。
+> **当前版本**：v0.5 — 已实现 LangGraph Agent 状态机、三状态置信度判断（answerable/low_confidence/not_found）、工具调用（Calculator/DatabaseQuery）、AST 安全表达式解析、BM25 热更新、CORS 安全配置。
 
 ---
 
@@ -21,8 +21,8 @@
 | 层级 | 技术选型 | 实际配置 |
 |:---|:---|:---|
 | **应用层** | Streamlit + FastAPI | Streamlit 前端 (`app/web/main.py`) + FastAPI/Uvicorn 后端 (`app/api/main.py:8000`) |
-| **Agent 层** | LangChain Agents | Agent Router 意图识别 + RAG Chain 调用（ReAct 模式基础框架） |
-| **RAG 层** | LangChain LCEL Chain | Dense Retrieval → Rerank → Context Builder → LLM Generate |
+| **Agent 层** | LangChain Agents + LangGraph | 双架构 Agent Router（legacy if-else / LangGraph StateGraph）+ TOOL_CALL 工具调用 |
+| **RAG 层** | LangChain LCEL Chain | MultiQuery → Hybrid Retrieval (BM25+Dense) → Cross-Encoder Rerank → Context Builder → LLM Generate |
 | **LLM 层** | OpenAI SDK (兼容接口) | MiMo-v2.5 (`https://token-plan-cn.xiaomimimo.com/v1`) |
 | **Embedding** | HuggingFace `sentence-transformers` | BGE-small-zh-v1.5 (512维)，通过 `hf-mirror.com` 下载 |
 | **向量数据库** | Chroma | 本地持久化 (`./chroma_db`)，元数据过滤 (`doc_id`) |
@@ -37,6 +37,7 @@
 - **文档身份追踪**：`doc_id = MD5(file_bytes)`，相同文件内容自动去重/覆盖
 - **Chunk 级元数据注入**：每个文本块都携带 `doc_id` + `source_file`，支持精确删除与溯源
 - **中文 Embedding 本地部署**：BGE-small-zh-v1.5 针对中文语义优化，无需依赖外部 Embedding API
+- **配置热切换**：`.env` 中 `LLM_CLIENT_TYPE`（openai/langchain）和 `AGENT_ROUTER_TYPE`（legacy/langgraph）独立正交切换，零代码侵入回退到原始系统
 
 ---
 
@@ -132,8 +133,14 @@ RERANKER_LOCAL_PATH=./models/bge-reranker-base
          │
          ▼
 ┌─────────────────┐
-│ Agent Router    │  ← 意图识别：当前默认路由至 RAG Chain
-│ 意图路由         │    (可扩展：摘要、对比、计算等)
+│ Agent Router    │  ← 意图识别：factual_qa / comparison / summarization /
+│ 意图路由         │    multi_step / tool_call / chitchat
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ MultiQuery      │  ← LLM 生成 3 个查询变体，覆盖不同关键词和语义角度
+│ 查询扩展         │
 └────────┬────────┘
          │
          ▼
@@ -144,8 +151,14 @@ RERANKER_LOCAL_PATH=./models/bge-reranker-base
          │
          ▼
 ┌─────────────────┐
-│ Chroma 相似检索 │  ← top_k=15 (原5→15)，余弦相似度
-│ Dense Search    │    where 过滤可选
+│ Hybrid Retrieval│  ← Dense(Chroma) + Sparse(BM25) RRF 融合
+│ 混合检索         │    top_k=15，where 过滤可选
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Cross-Encoder   │  ← BAAI/bge-reranker-base 精排，分数 sigmoid 归一化到 [0,1]
+│ Reranker        │    低于阈值触发 not_found / low_confidence
 └────────┬────────┘
          │
          ▼
@@ -156,13 +169,13 @@ RERANKER_LOCAL_PATH=./models/bge-reranker-base
          │
          ▼
 ┌─────────────────┐
-│ LLM Generate    │  ← MiMo-v2.5，system prompt 强制要求多文件综合分析
-│ 回答生成         │    附带来源引用（文档名+页码）
+│ LLM Generate    │  ← MiMo-v2.5，三状态差异化 system prompt
+│ 回答生成         │    answerable(正常) / low_confidence(谨慎) / not_found(拒答)
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ 输出 → 前端     │  ← 回答文本 + sources[] 溯源卡片
+│ 输出 → 前端     │  ← 回答文本 + sources[] 溯源卡片 + answer_status 置信度
 │ 溯源 + 持久化   │    SQLite 保存对话历史
 └─────────────────┘
 ```
@@ -184,10 +197,14 @@ RERANKER_LOCAL_PATH=./models/bge-reranker-base
 │   ├── web/main.py              # Streamlit 前端：批量上传、文档管理、聊天界面
 │   └── core/config.py           # Pydantic Settings：LLM/Embedding/向量库配置
 ├── agent/
-│   └── router.py                # Agent Router：意图识别与工具调度（基础框架）
+│   ├── router.py                # Legacy Agent Router：意图识别与工具调度（if-else 分支）
+│   ├── langgraph_router.py      # LangGraph Agent Router：StateGraph 状态机 + ReAct 工具调用
+│   └── tools/base.py            # 工具基类 + CalculatorTool + DatabaseQueryTool + ToolRegistry
 ├── rag/
-│   ├── chains/rag_chain.py      # RAGChain：检索→上下文组装→LLM生成
-│   └── retrievers/              # 检索器（Dense + Hybrid 扩展位）
+│   ├── chains/rag_chain.py      # RAGChain：MultiQuery→检索→上下文组装→LLM生成 + 三状态置信度
+│   ├── retrievers/hybrid.py     # HybridRetriever：Dense(Chroma) + Sparse(BM25) RRF 融合
+│   └── post_processors/
+│       └── reranker.py          # CrossEncoderReranker + ScoreThresholdFilter + NoOpReranker
 ├── ingestion/
 │   ├── loaders/factory.py       # Loader 工厂：PDF/MD/TXT/DOCX/PPTX/HTML
 │   ├── loaders/txt_loader.py    # 原生 TXT Loader（零依赖）
@@ -214,9 +231,10 @@ RERANKER_LOCAL_PATH=./models/bge-reranker-base
 ## 🚀 快速开始
 
 ### 环境要求
-- Python 3.8+
+- **Python 3.11+**（LangGraph 要求 Python ≥ 3.9，推荐 3.11）
 - Windows / Linux / macOS
 - 网络：可访问 `hf-mirror.com`（首次下载 BGE 模型）和 MiMo API
+- **GPU 建议**：NVIDIA GPU 用于 Cross-Encoder 加速（CUDA 11.8，sm_61 及以上）
 
 ### 安装依赖
 
@@ -241,17 +259,33 @@ OPENAI_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
 LLM_MODEL=MiMo-v2.5
 
 # Embedding 配置（本地 BGE，首次自动下载）
-EMBEDDING_PROVIDER=local
+EMBEDDING_PROVIDER=bge
 EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 EMBEDDING_DIMENSION=512
 HF_ENDPOINT=https://hf-mirror.com
 
 # 向量数据库
-VECTORSTORE_TYPE=chroma
+VECTORSTORE_PROVIDER=chroma
 CHROMA_PERSIST_DIR=./chroma_db
 
-# 元数据数据库
-DATABASE_PATH=./data/app.db
+# 元数据数据库（SQLite 自动初始化，无需手动创建）
+# DATABASE_PATH=./data/app.db
+
+# === Agent / LangChain 配置切换 ===
+LLM_CLIENT_TYPE=langchain        # openai / langchain
+AGENT_ROUTER_TYPE=langgraph      # legacy / langgraph
+ENABLE_AGENT=true
+
+# Reranker 模型（需手动下载到 ./models/bge-reranker-base/）
+RERANKER_MODEL=BAAI/bge-reranker-base
+RERANKER_LOCAL_PATH=./models/bge-reranker-base
+
+# 回答置信度阈值（基于 Cross-Encoder 归一化分数）
+ANSWER_STATUS_THRESHOLD_HIGH=0.6   # ≥0.6 → answerable
+ANSWER_STATUS_THRESHOLD_LOW=0.3    # <0.3 → not_found；中间 → low_confidence
+
+# CORS（生产环境应限制为具体域名）
+CORS_ORIGINS=http://localhost:8501,http://127.0.0.1:8501
 ```
 
 ### 初始化与启动
@@ -286,47 +320,74 @@ python -m ingestion.pipeline --input-path ./data/documents/
 
 ---
 
-## ✨ 已实现功能 (v0.3)
+## ✨ 已实现功能
+
+### v0.5 — 当前版本
+
+| 功能模块 | 状态 | 说明 |
+|:---|:---|:---|
+| **LangGraph Agent Router** | ✅ | StateGraph 状态机：`analyze_intent → plan → route → [factual_qa\|tool_call\|...] → finalize` |
+| **ReAct 工具调用** | ✅ | `calculator` + `database_query`，`TOOL:xxx\nARGS:{...}` 格式解析 |
+| **三状态置信度判断** | ✅ | `answerable`(≥0.6) / `low_confidence`([0.3,0.6)) / `not_found`(<0.3)，差异化 system prompt |
+| **Cross-Encoder 分数归一化** | ✅ | `torch.sigmoid` 将 logits 归一化到 [0,1]，统一阈值尺度 |
+| **配置热切换** | ✅ | `LLM_CLIENT_TYPE`(openai/langchain) + `AGENT_ROUTER_TYPE`(legacy/langgraph) 正交组合，零侵入回退 |
+| **BM25 热更新** | ✅ | 文档上传/删除后自动重建 BM25 语料库，无需重启 |
+| **CORS 安全配置** | ✅ | 默认仅允许 localhost，生产环境通过 `.env` 配置白名单 |
+| **CalculatorTool 安全加固** | ✅ | `eval()` → AST 安全解析器，完全阻断代码注入 |
+
+### v0.4 — 检索质量优化
+
+| 功能模块 | 状态 | 说明 |
+|:---|:---|:---|
+| **混合检索** | ✅ | BM25 + Dense 向量检索 RRF 融合（`HybridRetriever`） |
+| **Cross-Encoder Reranker** | ✅ | `BAAI/bge-reranker-base` 精排，GPU 自动加速 |
+| **MultiQuery 查询扩展** | ✅ | LLM 生成 3 个查询变体，并行检索合并去重 |
+| **流式输出** | ✅ | FastAPI SSE + Streamlit `st.write_stream` |
+| **结构化输出** | ✅ | Pydantic `EvaluationResult` + `response_format=json_object` |
+
+### v0.3 — 基础能力
 
 | 功能模块 | 状态 | 说明 |
 |:---|:---|:---|
 | **多格式文档解析** | ✅ | PDF(PyMuPDF)、TXT(原生)、MD(原生)、DOCX/PPTX/HTML(Unstructured) |
 | **文档生命周期管理** | ✅ | 上传(自动去重/覆盖)、删除(向量+元数据双清)、文档列表查询 |
-| **中文 Embedding** | ✅ | BGE-small-zh-v1.5 本地部署，512维，hf-mirror 镜像下载 |
+| **中文 Embedding** | ✅ | BGE-small-zh-v1.5 本地部署，512维 |
 | **向量检索** | ✅ | Chroma 稠密检索，top_k=15，元数据过滤 |
 | **多文件上下文组装** | ✅ | 按文件名分组，确保每个来源至少出现一次，max_tokens=8000 |
 | **对话历史持久化** | ✅ | SQLite 存储，Streamlit 自动加载历史会话 |
-| **前端界面** | ✅ | Streamlit：批量上传（进度条）、文档管理（删除按钮）、聊天（溯源卡片） |
-| **RESTful API** | ✅ | FastAPI：chat/ingest/delete/stats/history，同步 def 防阻塞 |
-| **评估框架** | ✅ | 自动生成语料 → 生成 QA → 端到端评测（4维度 × 3难度） |
-| **Agent 路由框架** | ✅ | 基础意图识别与 RAG Chain 调度，可扩展更多工具 |
+| **前端界面** | ✅ | Streamlit：批量上传、文档管理、聊天溯源 |
+| **RESTful API** | ✅ | FastAPI：chat/ingest/delete/stats/history |
+| **评估框架** | ✅ | 自动生成语料 → 生成 QA → 端到端评测 |
 
 ---
 
 ## 🛣️ 演进路线
 
-### 当前 (v0.4) — 已交付
+### 当前 (v0.5) — 已交付
+- **LangGraph Agent 状态机**：`analyze_intent → plan → route → [factual_qa|comparison|summarization|multi_step|tool_call|chitchat] → finalize`
+- **ReAct 工具调用**：`calculator`（AST 安全解析）+ `database_query`（mock 销售数据）
+- **三状态置信度判断**：`answerable`(≥0.6) / `low_confidence`([0.3,0.6)) / `not_found`(<0.3)，reranker 分数 sigmoid 归一化
+- **配置热切换**：`LLM_CLIENT_TYPE`(openai/langchain) + `AGENT_ROUTER_TYPE`(legacy/langgraph) 正交组合
+- **BM25 热更新**：文档 upload/delete 后自动重建语料库
+- **安全加固**：`eval()` → AST 解析器、CORS 白名单限制
 - 完整的文档摄取 → 检索 → 生成 → 评估闭环
-- 电力行业 4 领域（调度/保护/配电/设备）测试语料与 25 条标注 QA
-- 文档生命周期一致性（API/前端 upload/delete/overwrite）
-- 混合检索 (BM25 + Dense RRF) + Cross-Encoder Reranker + MultiQuery
-- 流式输出 (Streaming) + 结构化输出 (Structured Output)
+- 电力行业 4 领域测试语料与 25 条标注 QA
 
-### 近期 (v0.4) — 检索质量优化 ✅ 已完成
+### v0.4 — 检索质量优化 ✅ 已完成
 - [x] **混合检索**：BM25 + Dense 向量检索 RRF 融合（`HybridRetriever`）
-- [x] **重排序器 (Reranker)**：`BAAI/bge-reranker-base` Cross-Encoder 精排
+- [x] **重排序器 (Reranker)**：`BAAI/bge-reranker-base` Cross-Encoder 精排，GPU 加速
 - [x] **MultiQuery 查询扩展**：LLM 生成 3 个查询变体，并行检索合并去重
 - [x] **流式输出**：FastAPI SSE + Streamlit `st.write_stream`
 - [x] **结构化输出**：Pydantic `EvaluationResult` + `response_format=json_object`
 
-### 中期 (v0.5) — 检索与 Agent 增强
+### v0.6 — 检索与 Agent 增强
 - [ ] **向量库升级（Milvus 原生混合检索）**：将 Dense + Sparse(BM25) 统一存入 Milvus，替代当前 Chroma + 外挂 `rank_bm25` 架构，实现插入即生效、无需重启、支持百万级规模
-- [ ] **查询重写 (Query Rewrite)**：基于 LLM 的问题扩展与澄清，提升检索相关性
+- [ ] **查询重写 (Query Rewrite)**：基于 LLM 的问题扩展与澄清，提升检索相关性（MultiQuery 已覆盖扩展部分，澄清式追问待补充）
 - [ ] **HyDE (假设文档嵌入)**：用 LLM 生成伪答案再 Embedding，改善短查询检索效果
-- [ ] **Agent 多步推理**：ReAct / Plan-and-Execute 完整实现，支持"先查 A 再查 B 最后对比"类复合任务
+- [ ] **Agent 多步推理**：多轮 ReAct 循环（观察→思考→行动），支持"先查 A 再查 B 最后对比"类复合任务（当前为单轮工具调用）
 
-### 远期 (v0.6-v1.0) — 生产级能力
-- [ ] **工具扩展**：接入计算器、数据库查询、外部 API 等自定义 Tool
+### 远期 (v0.7-v1.0) — 生产级能力
+- [x] **工具扩展**：`calculator` + `database_query` 已接入（🟡 待扩展更多实际业务工具）
 - [ ] **多模态文档**：图像 OCR（表格、接线图）、PDF 内嵌图片解析
 - [ ] **对话记忆压缩**：长对话历史自动摘要，避免上下文窗口溢出
 - [ ] **权限控制**：基于用户/角色的文档访问隔离（同一份向量库，不同可见范围）
@@ -361,11 +422,12 @@ python tests/evaluate.py --qa_file tests/qa_samples/all_qa.json --output tests/r
 
 ## ⚠️ 已知限制
 
-1. **Embedding API 不可用**：当前 provider（MiMo）不支持 `/v1/embeddings`，必须使用本地 BGE 模型
-2. **BM25 未启用**：`HybridRetriever` 仅 Dense 检索生效，BM25 语料库待初始化
-3. **CLI 摄取元数据缺失**：`python -m ingestion.pipeline` 不入 SQLite `documents` 表，前端列表不可见
-4. **首次清理**：旧版 `chroma_db` 中的 chunk 可能缺少 `doc_id`，首次使用前建议清空 `./chroma_db` 和 `./data/app.db`
-5. **Python 3.8 兼容**：f-string 反斜杠、posthog 版本、Pydantic extra 字段等已做适配
+1. **Embedding API 不可用**：当前 LLM provider（MiMo）不支持 `/v1/embeddings`，必须使用本地 BGE 模型
+2. **CLI 摄取元数据缺失**：`python -m ingestion.pipeline` 不入 SQLite `documents` 表，前端列表不可见
+3. **首次清理**：旧版 `chroma_db` 中的 chunk 可能缺少 `doc_id`，首次使用前建议清空 `./chroma_db` 和 `./data/app.db`
+4. **Agent 流式输出**：Agent 模式（LangGraph）暂不支持 SSE 流式，fallback 到非流式一次性返回
+5. **RAGAS 兼容性**：MiMo API 不支持 `n` 参数，`tests/ragas_eval.py` 标记为实验性脚本，未纳入正式评测
+6. **单轮工具调用**：当前 `tool_call_node` 为单轮 ReAct（LLM → 工具 → 整合结果），多轮循环（观察→思考→行动）待扩展
 
 ---
 
