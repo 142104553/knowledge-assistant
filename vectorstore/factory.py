@@ -99,6 +99,11 @@ class BaseVectorStore(ABC):
         pass
 
     @abstractmethod
+    def clear(self) -> None:
+        """清空整个 Collection（谨慎使用）"""
+        pass
+
+    @abstractmethod
     def count(self) -> int:
         """返回 Collection 中的文档总数"""
         pass
@@ -234,6 +239,10 @@ class ChromaVectorStore(BaseVectorStore):
             self.collection.delete(where=filter_dict)
         else:
             raise ValueError("必须提供 ids 或 filter_dict 之一")
+
+    def clear(self) -> None:
+        """清空整个 Collection"""
+        self.collection.delete()
 
     def count(self) -> int:
         return self.collection.count()
@@ -417,6 +426,10 @@ class QdrantVectorStore(BaseVectorStore):
             )
         else:
             raise ValueError("必须提供 ids 或 filter_dict 之一")
+
+    def clear(self) -> None:
+        """清空整个 Collection（通过删除所有点实现）"""
+        self.client.delete(collection_name=self.collection_name, points_selector={})
 
     def count(self) -> int:
         return self.client.count(collection_name=self.collection_name).count

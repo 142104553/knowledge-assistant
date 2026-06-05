@@ -205,6 +205,37 @@ def render_sidebar():
 
         st.divider()
 
+        # 危险操作：一键清空数据库
+        with st.expander("⚠️ 危险操作：一键清空数据库", expanded=False):
+            st.error("此操作将永久删除所有数据，包括：\n- 向量库中的所有文档 chunk\n- SQLite 中的文档元数据\n- 所有对话历史\n\n**不可恢复！**")
+            confirm_text = st.text_input(
+                "请输入 `CLEAR` 以确认清空",
+                placeholder="输入 CLEAR",
+                key="clear_db_confirm"
+            )
+            if st.button("🗑️ 确认清空全部数据", type="primary", key="btn_clear_db"):
+                if confirm_text.strip().upper() == "CLEAR":
+                    try:
+                        resp = requests.post(
+                            f"{API_BASE_URL}/api/v1/database/clear",
+                            timeout=30
+                        )
+                        if resp.status_code == 200:
+                            st.success("数据库已清空！")
+                            # 重置前端状态
+                            st.session_state.messages = []
+                            import uuid
+                            st.session_state.session_id = str(uuid.uuid4())
+                            st.rerun()
+                        else:
+                            st.error(f"清空失败: {resp.text}")
+                    except Exception as e:
+                        st.error(f"请求失败: {e}")
+                else:
+                    st.warning("请输入 `CLEAR` 以确认操作")
+
+        st.divider()
+
         # 文件上传（支持批量）
         st.subheader("⬆️ 上传新文档")
         uploaded_files = st.file_uploader(

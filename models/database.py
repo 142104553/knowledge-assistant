@@ -219,4 +219,16 @@ def delete_document_meta(doc_id: str) -> None:
             conn.commit()
         finally:
             conn.close()
-    conn.close()
+
+
+def clear_all_data() -> None:
+    """清空所有数据（线程安全）：文档元数据 + 对话历史"""
+    with _db_write_lock:
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM documents")
+            cursor.execute("DELETE FROM conversations")
+            conn.commit()
+        finally:
+            conn.close()

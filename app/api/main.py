@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 
 from app.core.config import get_settings, Settings
 from models.document import QueryRequest, ChatResponse
-from models.database import init_db, save_message, get_conversation_history, list_documents, delete_document_meta
+from models.database import init_db, save_message, get_conversation_history, list_documents, delete_document_meta, clear_all_data
 
 # 全局依赖（lifespan 中初始化）
 rag_chain = None
@@ -415,6 +415,37 @@ def delete_document(doc_id: str):
 # 统计接口
 # ═══════════════════════════════════════════════════════════
 
+@app.post("/api/v1/database/clear")
+def clear_database():
+    """
+    一键清空数据库（向量库 + 文档元数据 + 对话历史）
+
+    ⚠️ 危险操作，不可恢复！
+    """
+    global bm25_retriever, retriever
+    try:
+        # 1. 清空向量库
+        if vector_store:
+            vector_store.clear()
+            print("[OK] Vector store cleared")
+
+        # 2. 清空 SQLite（documents + conversations）
+        clear_all_data()
+        print("[OK] SQLite cleared")
+
+        # 3. 重置 BM25
+        bm25_retriever = None
+        if retriever:
+            retriever.bm25_retriever = None
+        print("[OK] BM25 reset")
+
+        return {"status": "success", "message": "数据库已清空"}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/v1/stats")
 def get_stats():
     """获取知识库统计信息"""
@@ -423,8 +454,7 @@ def get_stats():
 
     return {
         "total_documents_in_store": vector_store.count() if vector_store else 0,
-        "total_files_uploaded": len(docs),
-        "collection_name": settings.vectorstore_collection,
+        "total_files_uploaded": len(docs),        "collection_name": settings.vectorstore_collection,
         "embedding_model": settings.embedding_model,
         "vectorstore_provider": settings.vectorstore_provider
     }
