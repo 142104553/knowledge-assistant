@@ -190,6 +190,9 @@ class BGEEmbeddingClient(BaseEmbeddingClient):
     @property
     def dimension(self) -> int:
         # BGE-large-zh 是 1024 维，其他模型可能不同
+        # 兼容 sentence-transformers 3.x 和 5.x
+        if hasattr(self.model, 'get_embedding_dimension'):
+            return self.model.get_embedding_dimension()
         return self.model.get_sentence_embedding_dimension()
 
     @property

@@ -49,8 +49,21 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-base"
     reranker_local_path: Optional[str] = None  # 本地模型路径，优先于 Hub 下载
 
+    # === 回答置信度阈值（基于 Reranker 分数） ===
+    # high:  最高分 >= 此值 → answerable（正常回答）
+    # low:   最高分 < 此值 → not_found（拒答）；[low, high) → low_confidence（谨慎回答）
+    answer_status_threshold_high: float = 0.6
+    answer_status_threshold_low: float = 0.3
+
     # === Agent 配置 ===
     enable_agent: bool = True
+    agent_router_type: str = "legacy"  # legacy / langgraph
+
+    # === LangChain 配置 ===
+    llm_client_type: str = "openai"  # openai / langchain
+
+    # === CORS 配置 ===
+    cors_origins: Optional[str] = "http://localhost:8501,http://127.0.0.1:8501"  # 逗号分隔，生产环境应限制具体域名
 
     # === 应用配置 ===
     app_name: str = "Enterprise Knowledge Assistant"

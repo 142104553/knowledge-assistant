@@ -74,7 +74,12 @@ class CrossEncoderReranker(BaseReranker):
             load_path = model_name
             print(f"[Reranker] Loading from HuggingFace Hub: {model_name}")
 
+        import torch
         self.model = CrossEncoder(load_path, local_files_only=True)
+        # 自动使用 GPU（CUDA 兼容时）
+        if torch.cuda.is_available():
+            self.model.model = self.model.model.to('cuda')
+            print(f"[Reranker] Model moved to GPU: {torch.cuda.get_device_name(0)}")
         self.model_name = model_name
         self.local_path = local_path
 
@@ -91,7 +96,11 @@ class CrossEncoderReranker(BaseReranker):
         pairs = [(query, c.content) for c in candidates]
 
         # 批量打分（batch_size 可调大以利用 GPU）
-        scores = self.model.predict(pairs, batch_size=8, show_progress_bar=False)
+        raw_scores = self.model.predict(pairs, batch_size=8, show_progress_bar=False)
+
+        # 将 logits 通过 sigmoid 归一化到 [0, 1]，确保分数范围统一
+        import torch
+        scores = torch.sigmoid(torch.tensor(raw_scores, dtype=torch.float32)).numpy()
 
         # 组装结果
         ranked = []
@@ -99,7 +108,7 @@ class CrossEncoderReranker(BaseReranker):
             ranked.append(RetrievedChunk(
                 content=chunk.content,
                 metadata=chunk.metadata,
-                score=float(score)  # Cross-Encoder 直接输出相关性分数
+                score=float(score)  # 归一化后的概率分数
             ))
 
         # 按分数从高到低排序

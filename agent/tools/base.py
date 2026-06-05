@@ -10,9 +10,54 @@ Agent 的强大之处在于可以调用外部工具扩展能力。
     # 返回: ToolResult(output=4, success=True)
 """
 
+import ast
+import operator
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 from dataclasses import dataclass
+
+
+# 安全数学表达式解析器（替代 eval）
+_SAFE_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.USub: operator.neg,
+    ast.Mod: operator.mod,
+    ast.FloorDiv: operator.floordiv,
+}
+
+
+def _safe_eval(expr: str) -> float:
+    """
+    安全地计算数学表达式，仅允许数字和基本运算符。
+    完全避免 eval() 的安全风险。
+    """
+    tree = ast.parse(expr, mode='eval')
+
+    def _eval(node):
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float)):
+                return node.value
+            raise ValueError("表达式中只允许数字")
+        elif isinstance(node, ast.BinOp):
+            op = _SAFE_OPS.get(type(node.op))
+            if not op:
+                raise ValueError(f"不支持的运算符: {type(node.op).__name__}")
+            return op(_eval(node.left), _eval(node.right))
+        elif isinstance(node, ast.UnaryOp):
+            op = _SAFE_OPS.get(type(node.op))
+            if not op:
+                raise ValueError(f"不支持的一元运算符: {type(node.op).__name__}")
+            return op(_eval(node.operand))
+        elif isinstance(node, ast.Expression):
+            return _eval(node.body)
+        else:
+            raise ValueError(f"不支持的表达式类型: {type(node).__name__}")
+
+    return _eval(tree)
 
 
 @dataclass
@@ -81,7 +126,7 @@ class CalculatorTool(BaseTool):
             if not all(c in allowed_chars for c in expression.replace(" ", "")):
                 raise ValueError("表达式包含非法字符")
 
-            result = eval(expression)  # 在生产环境中应使用更安全的解析器，如 numexpr
+            result = _safe_eval(expression)  # 使用 AST 安全解析器替代 eval()
             return ToolResult(
                 tool_name=self.name,
                 input_params={"expression": expression},

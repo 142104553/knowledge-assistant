@@ -32,11 +32,41 @@ from models.database import init_db, save_message, get_conversation_history, lis
 rag_chain = None
 agent_router = None
 vector_store = None
+bm25_retriever = None
+retriever = None
+
+
+def _rebuild_bm25():
+    """重建 BM25 语料库（文档增删后调用）"""
+    global bm25_retriever, retriever, vector_store
+    if not vector_store:
+        return False
+    try:
+        from rag.retrievers.hybrid import BM25Retriever
+        all_docs = vector_store.get_all()
+        if not all_docs:
+            bm25_retriever = None
+            if retriever:
+                retriever.bm25_retriever = None
+            print("[OK] BM25 cleared (no docs)")
+            return True
+        new_bm25 = BM25Retriever(
+            texts=[d.content for d in all_docs],
+            metadatas=[d.metadata for d in all_docs]
+        )
+        bm25_retriever = new_bm25
+        if retriever:
+            retriever.bm25_retriever = new_bm25
+        print(f"[OK] BM25 rebuilt | docs: {len(all_docs)}")
+        return True
+    except Exception as e:
+        print(f"[WARN] BM25 rebuild failed: {e}")
+        return False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global rag_chain, agent_router, vector_store
+    global rag_chain, agent_router, vector_store, bm25_retriever, retriever
 
     # 初始化数据库
     init_db()
@@ -69,11 +99,11 @@ async def lifespan(app: FastAPI):
     # 初始化检索链
     from rag.retrievers.hybrid import HybridRetriever, BM25Retriever
     from rag.post_processors.reranker import CrossEncoderReranker
-    from rag.chains.rag_chain import LLMClient, RAGChain
+    from rag.chains.rag_chain import LLMClient, LangChainLLMClient, RAGChain
     from agent.router import AgentRouter
+    from agent.langgraph_router import LangGraphAgentRouter
 
     # 构建 BM25 语料库（从向量库读取已有文档）
-    bm25_retriever = None
     doc_count = vector_store.count()
     if doc_count > 0:
         try:
@@ -103,19 +133,42 @@ async def lifespan(app: FastAPI):
         print(f"[WARN] Cross-Encoder load failed: {e}, using NoOpReranker")
         reranker = NoOpReranker()
 
-    llm = LLMClient(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
-        model=settings.llm_model
-    )
+    if settings.llm_client_type == "langchain":
+        llm = LangChainLLMClient(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.llm_model,
+            temperature=settings.llm_temperature
+        )
+        print("[OK] LangChain LLM client enabled")
+    else:
+        llm = LLMClient(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.llm_model
+        )
+        print("[OK] OpenAI LLM client enabled")
     rag_chain = RAGChain(
         embedder=embedder,
         retriever=retriever,
         reranker=reranker,
         llm=llm,
-        max_context_tokens=settings.max_context_tokens
+        max_context_tokens=settings.max_context_tokens,
+        answer_status_threshold_high=settings.answer_status_threshold_high,
+        answer_status_threshold_low=settings.answer_status_threshold_low,
     )
-    agent_router = AgentRouter(llm=llm, rag_chain=rag_chain)
+
+    if settings.agent_router_type == "langgraph":
+        from agent.tools.base import DEFAULT_TOOLS
+        agent_router = LangGraphAgentRouter(
+            llm=llm,
+            rag_chain=rag_chain,
+            tools=DEFAULT_TOOLS
+        )
+        print("[OK] LangGraph AgentRouter enabled")
+    else:
+        agent_router = AgentRouter(llm=llm, rag_chain=rag_chain)
+        print("[OK] Legacy AgentRouter enabled")
 
     print(f"[OK] Init done | docs: {doc_count} | hybrid: {'Y' if bm25_retriever else 'N'} | rerank: {'Y' if not isinstance(reranker, NoOpReranker) else 'N'}")
 
@@ -131,9 +184,12 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# CORS：从配置读取允许的来源，生产环境不应开放 *
+_settings = get_settings()
+_cors_origins = [o.strip() for o in (_settings.cors_origins or "http://localhost:8501,http://127.0.0.1:8501").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -215,13 +271,19 @@ def chat_stream(request: QueryRequest):
                     full_answer += chunk
                     yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
                 sources = rag_chain.get_last_sources()
+                answer_status = rag_chain.get_last_answer_status()
 
-            # 发送 sources
+            # 发送 sources（RAG 模式附带 answer_status）
             sources_json = [
                 {"content": s.content, "metadata": s.metadata, "score": s.score}
                 for s in sources
             ]
-            yield f"data: {json.dumps({'type': 'sources', 'sources': sources_json})}\n\n"
+            if not (settings.enable_agent and request.enable_agent):
+                # RAG 模式：附带 answer_status
+                yield f"data: {json.dumps({'type': 'sources', 'sources': sources_json, 'answer_status': answer_status})}\n\n"
+            else:
+                # Agent 模式：暂无 answer_status
+                yield f"data: {json.dumps({'type': 'sources', 'sources': sources_json})}\n\n"
 
             # 保存助手回答
             if request.session_id:
@@ -303,6 +365,9 @@ def ingest_document(file: UploadFile = File(...)):
         # 记录文档元数据
         save_document_meta(doc_id=doc_id, filename=file.filename, chunk_count=len(chunks))
 
+        # 重建 BM25 语料库（新增文档后热更新）
+        _rebuild_bm25()
+
         return {
             "status": "success",
             "filename": file.filename,
@@ -337,6 +402,10 @@ def delete_document(doc_id: str):
         if vector_store:
             vector_store.delete(filter_dict={"doc_id": doc_id})
         delete_document_meta(doc_id)
+
+        # 重建 BM25 语料库（删除文档后热更新）
+        _rebuild_bm25()
+
         return {"status": "success", "doc_id": doc_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

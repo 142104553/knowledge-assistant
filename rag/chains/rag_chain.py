@@ -102,6 +102,87 @@ class LLMClient:
                 yield delta.content
 
 
+class LangChainLLMClient:
+    """
+    LangChain 版 LLM 客户端
+
+    基于 langchain_openai.ChatOpenAI + LCEL，与 LLMClient 保持相同接口。
+    提供原生流式、回调钩子、结构化输出等能力。
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model: str = "gpt-4o-mini",
+        temperature: float = 0.3
+    ):
+        from langchain_openai import ChatOpenAI
+
+        import os
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        self.model = model
+        self.temperature = temperature
+
+        kwargs = {
+            "api_key": self.api_key,
+            "model": self.model,
+            "temperature": self.temperature,
+        }
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        self.llm = ChatOpenAI(**kwargs)
+
+    @staticmethod
+    def _escape_braces(text: str) -> str:
+        """转义花括号，避免被 ChatPromptTemplate 解析为变量占位符"""
+        return text.replace("{", "{{").replace("}", "}}")
+
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.3,
+        max_tokens: int = None
+    ) -> str:
+        """调用 LLM 生成文本（非流式）"""
+        from langchain_core.prompts import ChatPromptTemplate
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", self._escape_braces(system_prompt)),
+            ("user", self._escape_braces(user_prompt)),
+        ])
+        bind_kwargs = {"temperature": temperature}
+        if max_tokens is not None:
+            bind_kwargs["max_tokens"] = max_tokens
+        chain = prompt | self.llm.bind(**bind_kwargs)
+        response = chain.invoke({})
+        return response.content
+
+    def generate_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.3,
+        max_tokens: int = None
+    ):
+        """调用 LLM 生成文本（流式），yield 文本片段"""
+        from langchain_core.prompts import ChatPromptTemplate
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", self._escape_braces(system_prompt)),
+            ("user", self._escape_braces(user_prompt)),
+        ])
+        bind_kwargs = {"temperature": temperature}
+        if max_tokens is not None:
+            bind_kwargs["max_tokens"] = max_tokens
+        chain = prompt | self.llm.bind(**bind_kwargs)
+        for chunk in chain.stream({}):
+            if chunk.content:
+                yield chunk.content
+
+
 class RAGChain:
     """
     RAG 问答链
@@ -124,19 +205,34 @@ class RAGChain:
 6. 【边界判定】只有当参考资料完全与问题无关时，才回答："根据现有知识库，无法找到相关信息。"
 """
 
+    # 低置信度时的系统提示词：要求 LLM 更谨慎
+    SYSTEM_PROMPT_LOW_CONFIDENCE = """你是一个基于知识库的问答助手。请注意：本次查询检索到的参考资料相关性较低，可能无法完整回答问题。
+
+回答规则：
+1. 【谨慎回答】你只能根据提供的「参考资料」回答，如果资料不足以支撑结论，必须明确说明"根据现有资料，该问题无法完全确认"。
+2. 【部分回答】如果资料只能回答问题的某一部分，请说明"以下回答仅基于有限资料，可能不全面"。
+3. 【不编造】禁止编造知识库中没有的信息，禁止为了给出完整答案而进行合理推测。
+4. 【引用规范】引用来源时注明文件名和页码，格式如「根据 保护误动事故案例分析 第1页」。
+5. 【边界判定】如果参考资料完全与问题无关，直接回答："根据现有知识库，无法找到相关信息。"
+"""
+
     def __init__(
         self,
         embedder: BaseEmbeddingClient,
         retriever: HybridRetriever,
         reranker: BaseReranker,
         llm: LLMClient,
-        max_context_tokens: int = 4000
+        max_context_tokens: int = 4000,
+        answer_status_threshold_high: float = 0.6,
+        answer_status_threshold_low: float = 0.3,
     ):
         self.embedder = embedder
         self.retriever = retriever
         self.reranker = reranker
         self.llm = llm
         self.max_context_tokens = max_context_tokens
+        self.answer_status_threshold_high = answer_status_threshold_high
+        self.answer_status_threshold_low = answer_status_threshold_low
 
     def _generate_query_variants(self, query: str, n: int = 3) -> List[str]:
         """
@@ -220,6 +316,10 @@ class RAGChain:
         if not hasattr(self, '_thread_local'):
             self._thread_local = threading.local()
         self._thread_local.last_ranked = ranked
+
+        # 判断回答置信度状态
+        status = self._judge_answer_status(ranked)
+        self._thread_local.last_answer_status = status
         stage_times['rerank'] = int((datetime.now() - t0).total_seconds() * 1000)
 
         # === 阶段 4：上下文压缩与组装 ===
@@ -227,28 +327,33 @@ class RAGChain:
         context, files_in_context = self._build_context(ranked)
         stage_times['context'] = int((datetime.now() - t0).total_seconds() * 1000)
 
-        # === 阶段 5：LLM 生成 ===
+        # === 阶段 5：判断回答置信度状态 + LLM 生成 ===
         t0 = datetime.now()
-        if not ranked:
-            # 空结果触发拒答
+
+        if status == "not_found":
             answer = "根据现有知识库，无法找到与您的提问相关的信息。"
         else:
             user_prompt = self._build_prompt(query_request.query, context, ranked, files_in_context)
+            system_prompt = (
+                self.SYSTEM_PROMPT_LOW_CONFIDENCE if status == "low_confidence"
+                else self.SYSTEM_PROMPT
+            )
             answer = self.llm.generate(
-                system_prompt=self.SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 user_prompt=user_prompt
             )
         stage_times['llm'] = int((datetime.now() - t0).total_seconds() * 1000)
 
         elapsed = int((datetime.now() - start_time).total_seconds() * 1000)
         mq_time = stage_times.get('multiquery', 0)
-        print(f"[RAG] total:{elapsed}ms mq:{mq_time}ms embed:{stage_times['embed']}ms retrieve:{stage_times['retrieve']}ms rerank:{stage_times['rerank']}ms context:{stage_times['context']}ms llm:{stage_times['llm']}ms | variants:{len(query_variants)} | chunks:{len(ranked)} | query_len:{len(query_request.query)} | context_len:{len(context)}")
+        print(f"[RAG] total:{elapsed}ms mq:{mq_time}ms embed:{stage_times['embed']}ms retrieve:{stage_times['retrieve']}ms rerank:{stage_times['rerank']}ms context:{stage_times['context']}ms llm:{stage_times['llm']}ms | status:{status} | variants:{len(query_variants)} | chunks:{len(ranked)} | query_len:{len(query_request.query)} | context_len:{len(context)}")
 
         return ChatResponse(
             answer=answer,
             sources=ranked,
             query_time_ms=elapsed,
-            session_id=query_request.session_id
+            session_id=query_request.session_id,
+            answer_status=status
         )
 
     def stream(self, query_request: QueryRequest):
@@ -291,23 +396,58 @@ class RAGChain:
             self._thread_local = threading.local()
         self._thread_local.last_ranked = ranked
 
+        # 判断回答置信度状态
+        status = self._judge_answer_status(ranked)
+        self._thread_local.last_answer_status = status
+
         # === 阶段 4：上下文组装 ===
         context, files_in_context = self._build_context(ranked)
 
         # === 阶段 5：流式生成 ===
-        if not ranked:
+        if status == "not_found":
             yield "根据现有知识库，无法找到与您的提问相关的信息。"
             return
 
         user_prompt = self._build_prompt(query_request.query, context, ranked, files_in_context)
+        system_prompt = (
+            self.SYSTEM_PROMPT_LOW_CONFIDENCE if status == "low_confidence"
+            else self.SYSTEM_PROMPT
+        )
         yield from self.llm.generate_stream(
-            system_prompt=self.SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=user_prompt
         )
+
+    def _judge_answer_status(self, ranked: List[RetrievedChunk]) -> str:
+        """
+        根据 Reranker 分数判断回答置信度状态。
+
+        规则（基于 top chunk 的分数）：
+        - answerable:    top_score >= high_threshold  → 高置信度，正常回答
+        - low_confidence: top_score ∈ [low_threshold, high_threshold) → 谨慎回答
+        - not_found:      ranked 为空 或 top_score < low_threshold → 拒答
+
+        Returns:
+            "answerable" | "low_confidence" | "not_found"
+        """
+        if not ranked:
+            return "not_found"
+
+        top_score = ranked[0].score
+        if top_score >= self.answer_status_threshold_high:
+            return "answerable"
+        elif top_score >= self.answer_status_threshold_low:
+            return "low_confidence"
+        else:
+            return "not_found"
 
     def get_last_sources(self):
         """获取当前线程上一次 stream/invoke 的检索结果"""
         return getattr(getattr(self, '_thread_local', None), 'last_ranked', [])
+
+    def get_last_answer_status(self) -> str:
+        """获取当前线程上一次 stream/invoke 的回答置信度状态"""
+        return getattr(getattr(self, '_thread_local', None), 'last_answer_status', 'answerable')
 
     def _build_context(self, chunks: List[RetrievedChunk]) -> Tuple[str, Set[str]]:
         """

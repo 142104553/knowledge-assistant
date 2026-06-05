@@ -105,6 +105,11 @@ class ChatResponse(BaseModel):
     )
     query_time_ms: Optional[int] = Field(default=None, description="查询耗时（毫秒）")
     session_id: Optional[str] = Field(default=None, description="对话 session ID")
+    tool_results: Optional[List[dict]] = Field(default=None, description="工具调用结果（Agent 模式）")
+    answer_status: str = Field(
+        default="answerable",
+        description="回答置信度状态: answerable(高置信度) / low_confidence(低置信度) / not_found(未找到)"
+    )
 
 
 # ── 第1课小结 ──
