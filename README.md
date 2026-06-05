@@ -23,9 +23,9 @@
 | **应用层** | Streamlit + FastAPI | Streamlit 前端 (`app/web/main.py`) + FastAPI/Uvicorn 后端 (`app/api/main.py:8000`) |
 | **Agent 层** | LangChain Agents + LangGraph | 双架构 Agent Router（legacy if-else / LangGraph StateGraph）+ TOOL_CALL 工具调用 |
 | **RAG 层** | LangChain LCEL Chain | MultiQuery → Hybrid Retrieval (BM25+Dense) → Cross-Encoder Rerank → Context Builder → LLM Generate |
-| **LLM 层** | OpenAI SDK (兼容接口) | MiMo-v2.5 (`https://token-plan-cn.xiaomimimo.com/v1`) |
+| **LLM 层** | OpenAI SDK / LangChain ChatOpenAI | 多 Provider 路由：MiMo-v2.5 / Kimi (`moonshot-v1-8k`) / OpenAI，`.env` 一键切换 |
 | **Embedding** | HuggingFace `sentence-transformers` | BGE-small-zh-v1.5 (512维)，通过 `hf-mirror.com` 下载 |
-| **向量数据库** | Chroma | 本地持久化 (`./chroma_db`)，元数据过滤 (`doc_id`) |
+| **向量数据库** | Chroma / Milvus | Chroma 本地持久化 (`./chroma_db`) 或 Milvus standalone (`localhost:19530`) |
 | **元数据数据库** | SQLite | 文档注册表 + 对话历史 (`./data/app.db`) |
 | **文档解析** | 多 Loader 工厂 | PyMuPDF(PDF)、原生 Markdown、原生 TXT、Unstructured(DOCX/PPTX/HTML) |
 | **分块策略** | `RecursiveCharacterTextSplitter` | chunk_size ~512 tokens，overlap 50-100 |
@@ -253,26 +253,41 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --tr
 创建 `.env` 文件：
 
 ```env
-# LLM 配置（MiMo-v2.5，base_url 必须包含 /v1）
-OPENAI_API_KEY=your-api-key
+# ========== LLM 多 Provider 配置 ==========
+# 默认使用的 LLM Provider：mimo / kimi / openai
+LLM_DEFAULT_PROVIDER=kimi
+
+# MiMo 配置（OpenAI-compatible）
+OPENAI_API_KEY=your-mimo-api-key
 OPENAI_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
 LLM_MODEL=MiMo-v2.5
 
-# Embedding 配置（本地 BGE，首次自动下载）
+# Kimi (Moonshot) 配置
+KIMI_API_KEY=your-kimi-api-key
+KIMI_BASE_URL=https://api.moonshot.cn/v1
+KIMI_MODEL=moonshot-v1-8k
+
+LLM_CLIENT_TYPE=langchain        # openai / langchain
+LLM_TEMPERATURE=0.3
+
+# ========== Embedding 配置 ==========
 EMBEDDING_PROVIDER=bge
 EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 EMBEDDING_DIMENSION=512
 HF_ENDPOINT=https://hf-mirror.com
 
-# 向量数据库
+# ========== 向量数据库配置 ==========
+# chroma / milvus
 VECTORSTORE_PROVIDER=chroma
 CHROMA_PERSIST_DIR=./chroma_db
 
-# 元数据数据库（SQLite 自动初始化，无需手动创建）
-# DATABASE_PATH=./data/app.db
+# Milvus 配置（VECTORSTORE_PROVIDER=milvus 时生效）
+MILVUS_HOST=localhost
+MILVUS_PORT=19530
+# MILVUS_URI=http://localhost:19530
+# MILVUS_TOKEN=
 
-# === Agent / LangChain 配置切换 ===
-LLM_CLIENT_TYPE=langchain        # openai / langchain
+# ========== Agent / RAG 配置 ==========
 AGENT_ROUTER_TYPE=langgraph      # legacy / langgraph
 ENABLE_AGENT=true
 
@@ -280,16 +295,17 @@ ENABLE_AGENT=true
 RERANKER_MODEL=BAAI/bge-reranker-base
 RERANKER_LOCAL_PATH=./models/bge-reranker-base
 
-# 回答置信度阈值（基于 Cross-Encoder 归一化分数）
-ANSWER_STATUS_THRESHOLD_HIGH=0.6   # ≥0.6 → answerable
-ANSWER_STATUS_THRESHOLD_LOW=0.3    # <0.3 → not_found；中间 → low_confidence
+# 回答置信度阈值
+ANSWER_STATUS_THRESHOLD_HIGH=0.6
+ANSWER_STATUS_THRESHOLD_LOW=0.3
 
-# CORS（生产环境应限制为具体域名）
+# CORS
 CORS_ORIGINS=http://localhost:8501,http://127.0.0.1:8501
 ```
 
 ### 初始化与启动
 
+#### 默认：Chroma 模式
 ```bash
 # 1. 首次启动：初始化数据库
 python -c "from models.database import init_db; init_db()"
@@ -299,6 +315,19 @@ uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 # 3. 启动前端（新终端）
 streamlit run app/web/main.py
+```
+
+#### Milvus 模式（推荐大规模场景）
+```bash
+# 1. 安装 pymilvus
+pip install pymilvus>=2.4.0
+
+# 2. 启动 Milvus Standalone（需要 Docker）
+cd docker/milvus-standalone
+docker compose up -d
+
+# 3. .env 中设置 VECTORSTORE_PROVIDER=milvus
+# 4. 启动后端和前端（同上）
 ```
 
 ### 文档摄取（三种方式）

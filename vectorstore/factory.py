@@ -471,6 +471,9 @@ class VectorStoreFactory:
             return ChromaVectorStore(collection_name, dimension, **kwargs)
         elif provider == "qdrant":
             return QdrantVectorStore(collection_name, dimension, **kwargs)
+        elif provider == "milvus":
+            from vectorstore.milvus_store import MilvusVectorStore
+            return MilvusVectorStore(collection_name, dimension, **kwargs)
         else:
             raise ValueError(f"不支持的向量数据库: {provider}")
 

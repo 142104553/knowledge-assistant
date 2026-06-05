@@ -84,22 +84,39 @@ async def lifespan(app: FastAPI):
 
     # 初始化向量库
     from vectorstore.factory import VectorStoreFactory
-    chroma_path = Path(settings.chroma_persist_dir)
-    if chroma_path.exists() and any(chroma_path.iterdir()):
-        print(f"[INFO] Vector store exists: {settings.chroma_persist_dir}")
-        print(f"[INFO] Embedding dim: {embedder.dimension}D")
+    vs_provider = settings.vectorstore_provider.lower()
+
+    vs_kwargs = {}
+    if vs_provider == "chroma":
+        chroma_path = Path(settings.chroma_persist_dir)
+        if chroma_path.exists() and any(chroma_path.iterdir()):
+            print(f"[INFO] Vector store exists: {settings.chroma_persist_dir}")
+        vs_kwargs["persist_directory"] = settings.chroma_persist_dir
+    elif vs_provider == "milvus":
+        vs_kwargs = {
+            "host": settings.milvus_host,
+            "port": settings.milvus_port,
+        }
+        if settings.milvus_uri:
+            vs_kwargs["uri"] = settings.milvus_uri
+        if settings.milvus_token:
+            vs_kwargs["token"] = settings.milvus_token
+        print(f"[INFO] Connecting to Milvus: {settings.milvus_host}:{settings.milvus_port}")
+
+    print(f"[INFO] Embedding dim: {embedder.dimension}D")
 
     vector_store = VectorStoreFactory.create(
-        provider=settings.vectorstore_provider,
+        provider=vs_provider,
         collection_name=settings.vectorstore_collection,
         dimension=embedder.dimension,
-        persist_directory=settings.chroma_persist_dir
+        **vs_kwargs
     )
 
     # 初始化检索链
     from rag.retrievers.hybrid import HybridRetriever, BM25Retriever
     from rag.post_processors.reranker import CrossEncoderReranker
-    from rag.chains.rag_chain import LLMClient, LangChainLLMClient, RAGChain
+    from rag.chains.rag_chain import RAGChain
+    from rag.llm.factory import create_llm_client, get_provider_info
     from agent.router import AgentRouter
     from agent.langgraph_router import LangGraphAgentRouter
 
@@ -133,21 +150,13 @@ async def lifespan(app: FastAPI):
         print(f"[WARN] Cross-Encoder load failed: {e}, using NoOpReranker")
         reranker = NoOpReranker()
 
-    if settings.llm_client_type == "langchain":
-        llm = LangChainLLMClient(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.llm_model,
-            temperature=settings.llm_temperature
-        )
-        print("[OK] LangChain LLM client enabled")
-    else:
-        llm = LLMClient(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.llm_model
-        )
-        print("[OK] OpenAI LLM client enabled")
+    llm = create_llm_client(
+        client_type=settings.llm_client_type,
+        provider=settings.llm_default_provider,
+        settings=settings
+    )
+    provider_info = get_provider_info(settings)
+    print(f"[OK] {settings.llm_client_type.upper()} LLM client enabled | provider={provider_info['provider']} model={provider_info['model']}")
     rag_chain = RAGChain(
         embedder=embedder,
         retriever=retriever,

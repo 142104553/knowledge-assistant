@@ -27,16 +27,31 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.3
 
+    # === 多 LLM Provider 路由配置 ===
+    # 默认使用的 LLM Provider，支持：mimo / kimi / openai
+    llm_default_provider: str = "openai"
+
+    # Kimi (Moonshot) 配置
+    kimi_api_key: Optional[str] = None
+    kimi_base_url: str = "https://api.moonshot.cn/v1"
+    kimi_model: str = "moonshot-v1-8k"
+
     # === Embedding 配置 ===
     embedding_provider: str = "openai"  # openai / bge / mock
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
 
     # === 向量数据库配置 ===
-    vectorstore_provider: str = "chroma"  # chroma / qdrant
+    vectorstore_provider: str = "chroma"  # chroma / qdrant / milvus
     vectorstore_collection: str = "documents"
     chroma_persist_dir: str = "./chroma_db"
     qdrant_url: Optional[str] = "http://localhost:6333"
+
+    # Milvus 配置（vectorstore_provider=milvus 时生效）
+    milvus_host: str = "localhost"
+    milvus_port: str = "19530"
+    milvus_uri: Optional[str] = None       # 例如: http://localhost:19530 或文件路径用于 Milvus Lite
+    milvus_token: str = ""               # 认证 token（本地开发通常为空）
 
     # === RAG 配置 ===
     chunk_size: int = 512
